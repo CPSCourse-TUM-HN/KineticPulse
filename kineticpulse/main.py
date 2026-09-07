@@ -33,14 +33,21 @@ if hasattr(sys.stdout, "reconfigure"):
 from kineticpulse.alerts.payload import build_payload
 from kineticpulse.alerts.webhooks import WebhookDispatcher
 from kineticpulse.config import RuntimeConfig, load_config
+from kineticpulse.control import ScenarioController, build_scenario_controller
 from kineticpulse.fusion.engine import FusionEngine, FusionSnapshot
 from kineticpulse.fusion.tiers import EmergencyTier
 from kineticpulse.monitoring import MonitoringPublisher
 from kineticpulse.runtime_status import CaregiverRuntimeStatus
 from kineticpulse.sensors import build_sensor_client
+from kineticpulse.sensors.ppg_sim import (
+    PPG_SOURCE_HARDWARE,
+    PPG_SOURCE_SIMULATED,
+    SIMULATED_HR_NOTICE,
+)
 from kineticpulse.sensors.mock import (
     DEMO_CLI,
     DEMO_PLAYBOOKS,
+    ScenarioClock,
     MOCK_SCENARIOS,
     demo_posture,
 )
@@ -119,13 +126,23 @@ _POSTURE = {
 async def _script_demo_posture(
     detections_q: "asyncio.Queue[Detection]",
     stop: asyncio.Event,
-    scenario: str,
+    clock: ScenarioClock,
 ) -> None:
-    """Script detector class from the playbook — no camera, no real person."""
-    log.info("Demo vision: scenario=%s", scenario)
-    t0 = now_ms()
+    """Script detector class from the playbook — no camera, no real person.
+
+    Reads the same :class:`ScenarioClock` as the synthetic sensors, so a
+    control-panel switch restarts posture and telemetry at one shared t=0
+    instead of letting them drift apart. Scenarios without a posture
+    script (``resting``, the coarse ``fall_*`` ones) emit nothing, which is
+    what ``--no-camera`` did for them before the panel existed.
+    """
+    log.info("Demo vision: following scenario clock (scenario=%s)", clock.scenario)
     while not stop.is_set():
-        label = demo_posture(scenario, (now_ms() - t0) / 1000.0)
+        scenario, t_s = clock.scenario, clock.elapsed_s
+        if scenario not in DEMO_PLAYBOOKS:
+            await asyncio.sleep(0.2)
+            continue
+        label = demo_posture(scenario, t_s)
         fallen = label == "fallen"
         det = Detection(
             bbox_xyxy=(140.0, 220.0, 520.0, 680.0),
@@ -153,11 +170,11 @@ async def _vision_worker(
     actions_q: "asyncio.Queue[ActionLogits]",
     stop: asyncio.Event,
     no_camera: bool,
-    scenario: str = "resting",
+    scenario_clock: Optional[ScenarioClock] = None,
 ) -> None:
     if no_camera:
-        if scenario in DEMO_PLAYBOOKS:
-            await _script_demo_posture(detections_q, stop, scenario)
+        if scenario_clock is not None:
+            await _script_demo_posture(detections_q, stop, scenario_clock)
         else:
             log.info("--no-camera set; skipping capture loop.")
             await stop.wait()
@@ -256,6 +273,8 @@ async def _dispatch_worker(
     args: argparse.Namespace,
     stop: asyncio.Event,
     runtime_status: CaregiverRuntimeStatus,
+    ppg_source: str = PPG_SOURCE_HARDWARE,
+    control: Optional[ScenarioController] = None,
 ) -> None:
     dispatcher = WebhookDispatcher(cfg.alerts.webhooks)
     prompt_player = PromptPlayer()
@@ -301,7 +320,15 @@ async def _dispatch_worker(
             """Fire webhooks and open the live feed for one confirmed emergency."""
             session_id = f"{cfg.webrtc.session_id_prefix}-{uuid.uuid4().hex[:12]}"
             payload = build_payload(
-                cfg.alerts, snap, voice_extra=voice_extra, session_id=session_id
+                cfg.alerts, snap,
+                voice_extra=voice_extra,
+                session_id=session_id,
+                ppg_source=ppg_source,
+                simulation=(
+                    control.simulation_payload(ppg_source=ppg_source)
+                    if control is not None
+                    else None
+                ),
             )
             session_meta = build_session_meta(
                 session_id=session_id,
@@ -456,8 +483,19 @@ async def run(args: argparse.Namespace) -> int:
     log.info("KineticPulse starting (config=%s, mock_ble=%s, mock_stt=%s, no_camera=%s)",
              args.config, args.mock_ble, args.mock_stt, args.no_camera)
 
-    if args.mock_ble_scenario in DEMO_PLAYBOOKS and not cfg.wristband.has_accelerometer:
-        log.warning("Demo needs IMU samples; forcing wristband.has_accelerometer=true")
+    control_enabled = bool(cfg.monitoring.enabled and cfg.monitoring.control_enabled)
+
+    # The playbooks need accelerometer samples to reach their tiers. With the
+    # control panel on, *any* playbook can be selected later in the run, so
+    # the IMU has to be enabled up front rather than per starting scenario.
+    needs_imu = args.mock_ble_scenario in DEMO_PLAYBOOKS or (
+        control_enabled and args.mock_ble
+    )
+    if needs_imu and not cfg.wristband.has_accelerometer:
+        log.warning(
+            "Scripted scenarios need IMU samples; forcing "
+            "wristband.has_accelerometer=true"
+        )
         cfg.wristband.has_accelerometer = True
 
     detections_q: "asyncio.Queue[Detection]" = asyncio.Queue(maxsize=8)
@@ -487,10 +525,16 @@ async def run(args: argparse.Namespace) -> int:
     # behind cfg.wristband.transport. The factory transparently degrades to
     # the synthetic generator when --mock-ble is set or when transport=ble
     # is selected without a configured MAC.
+    # One clock shared by the synthetic sensors, the scripted-posture loop and
+    # the control panel, so a scenario switch moves all three together.
+    scenario_clock = (
+        ScenarioClock(args.mock_ble_scenario) if args.mock_ble else None
+    )
     sensors = build_sensor_client(
         cfg.wristband, sensor_q,
         mock=args.mock_ble,
         scenario=args.mock_ble_scenario,
+        clock=scenario_clock,
     )
     fusion = FusionEngine(
         cfg=cfg,
@@ -510,6 +554,29 @@ async def run(args: argparse.Namespace) -> int:
             pass
 
     runtime_status = CaregiverRuntimeStatus()
+    ppg_source = getattr(sensors, "ppg_source", PPG_SOURCE_HARDWARE)
+    if ppg_source == PPG_SOURCE_SIMULATED:
+        # The caregiver feed is the surface a human actually watches, so the
+        # synthetic pulse has to announce itself there too, not just in the
+        # logs. See kineticpulse.sensors.ppg_sim.
+        log.warning("%s", SIMULATED_HR_NOTICE)
+        runtime_status.push_event(
+            severity="warning",
+            category="sensor",
+            title="Heart rate is simulated",
+            detail=SIMULATED_HR_NOTICE,
+        )
+    control = build_scenario_controller(
+        sensors, enabled=control_enabled, runtime_status=runtime_status
+    )
+    if control_enabled and not control.available:
+        log.warning(
+            "monitoring.control_enabled is set but this runtime has no "
+            "scenario to drive (%s). The panel will report itself "
+            "unavailable.",
+            control.unavailable_reason,
+        )
+
     monitoring: Optional[MonitoringPublisher] = None
     if cfg.monitoring.enabled:
         monitoring = MonitoringPublisher(
@@ -519,6 +586,7 @@ async def run(args: argparse.Namespace) -> int:
             latest_snapshot=lambda: fusion.latest,
             sensors=sensors,
             runtime_status=runtime_status,
+            control=control,
         )
 
     tasks = [
@@ -526,10 +594,14 @@ async def run(args: argparse.Namespace) -> int:
         asyncio.create_task(fusion.run(), name="fusion"),
         asyncio.create_task(_vision_worker(
             cfg, detector, pose, detections_q, features_q, actions_q, stop,
-            args.no_camera, args.mock_ble_scenario,
+            args.no_camera, scenario_clock,
         ), name="vision"),
         asyncio.create_task(
-            _dispatch_worker(cfg, snapshots_q, args, stop, runtime_status),
+            _dispatch_worker(
+                cfg, snapshots_q, args, stop, runtime_status,
+                ppg_source=ppg_source,
+                control=control,
+            ),
             name="dispatch",
         ),
     ]

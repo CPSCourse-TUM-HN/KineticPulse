@@ -16,6 +16,15 @@ function heartRateStatus(payload: MonitoringWirePayload): HeartRateStatus {
   return "normal";
 }
 
+/**
+ * Older payloads predate the field, so absence means hardware. Either flag
+ * alone is enough - never AND them, or a partial rollout would silently drop
+ * the "not a real pulse" warning.
+ */
+function isSimulatedHeartRate(payload: MonitoringWirePayload): boolean {
+  return payload.sensor.ppg_source === "simulated" || payload.snapshot.hr_simulated === true;
+}
+
 function motionState(accel: string, magnitudeG: number | null): MotionState {
   if (magnitudeG === null || accel === "unknown") return "unknown";
   if (accel === "impact_tremor") return "tremor";
@@ -63,7 +72,8 @@ export function mapBackendMonitoringPayload(payload: MonitoringWirePayload): Mon
     },
     heartRate: {
       bpm: payload.snapshot.latest_hr_bpm,
-      status: heartRateStatus(payload)
+      status: heartRateStatus(payload),
+      simulated: isSimulatedHeartRate(payload)
     },
     motion: {
       state: motionState(payload.snapshot.accel, payload.snapshot.latest_accel_g),
@@ -82,6 +92,12 @@ export function mapBackendMonitoringPayload(payload: MonitoringWirePayload): Mon
     },
     voiceVerification: { status: payload.voice.status },
     alertDispatch: { status: payload.alert_dispatch.status },
+    simulation: {
+      drill: payload.simulation?.drill === true,
+      sensorSource: payload.simulation?.sensor_source ?? "hardware",
+      ppgSource: payload.simulation?.ppg_source ?? "hardware",
+      scenario: payload.simulation?.scenario ?? null
+    },
     recentEvents: payload.events
       .map((event) => ({
         id: event.id,

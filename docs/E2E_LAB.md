@@ -68,6 +68,32 @@ Trigger without falling on camera:
 
 (Use real TCP wristband instead of `--mock-ble` once step 2 is green.)
 
+## 5b. Scenario control panel (bench only)
+
+Skip on a real-hardware pass — the panel needs `--mock-ble` and is disabled by
+default. Use it to walk every tier without four restarts.
+
+```yaml
+monitoring:
+  control_enabled: true
+alerts:
+  webhooks: []          # or a test endpoint. A Tier-2 button really dispatches.
+```
+
+```bash
+python -m kineticpulse.main --config config.yaml --mock-ble --mock-stt --no-camera
+```
+
+- [ ] Log: `Scenario control surface is ENABLED ... Bench use only`
+- [ ] `curl -s http://127.0.0.1:8790/control | jq .available` → `true`
+- [ ] Dashboard `/control`: nine buttons, "Active scenario: Resting"
+- [ ] Press **Trip fall** → tier reaches `tier_1_verify` within ~11 s
+- [ ] Caregiver dashboard shows the amber **Drill in progress** banner
+- [ ] Event feed carries a warning-severity `Drill: Trip fall` entry
+- [ ] A Tier-2 button needs two presses (first arms, second dispatches)
+- [ ] **Stop (back to resting)** clears the drill banner
+- [ ] With `control_enabled: false`, `POST /control/scenario` → `403`
+
 ## 6. Pass criteria
 
 | Check | Pass |

@@ -6,7 +6,7 @@ export function normalMonitoringPayload(): MonitoringWirePayload {
     subject_id: "resident-001",
     location: "Living room",
     system: { connection: "connected" },
-    sensor: { connection: "connected" },
+    sensor: { connection: "connected", ppg_source: "hardware" },
     snapshot: {
       decision: { tier: "none", scenario: "monitoring", reason: "No fall signatures detected." },
       pose: "upright",
@@ -22,6 +22,12 @@ export function normalMonitoringPayload(): MonitoringWirePayload {
     },
     voice: { status: "not_required" },
     alert_dispatch: { status: "idle" },
+    simulation: {
+      drill: false,
+      sensor_source: "hardware",
+      ppg_source: "hardware",
+      scenario: null
+    },
     events: [
       { id: "runtime-2", timestamp_ms: now - 1_000, severity: "info", category: "vision", title: "Standing posture", detail: "Vision confidence 96%; no fall signature." },
       { id: "runtime-1", timestamp_ms: now - 2_000, severity: "info", category: "sensor", title: "Sensor sample received", detail: "Heart rate and motion are within normal bounds." }
@@ -56,5 +62,32 @@ export function pulseLostMonitoringPayload(): MonitoringWirePayload {
   payload.voice.status = "not_required";
   payload.alert_dispatch.status = "sent";
   payload.events = [];
+  return payload;
+}
+
+/**
+ * Bench run with a dead MAX30102: the transport is up and the BPM looks
+ * healthy, but it comes from the synthetic waveform in
+ * kineticpulse/sensors/ppg_sim.py.
+ */
+export function simulatedHeartRatePayload(): MonitoringWirePayload {
+  const payload = normalMonitoringPayload();
+  payload.sensor.ppg_source = "simulated";
+  payload.snapshot.hr_simulated = true;
+  return payload;
+}
+
+/**
+ * A control-panel drill: scripted telemetry is driving the pipeline, so
+ * nothing on the dashboard is a measurement.
+ */
+export function drillMonitoringPayload(): MonitoringWirePayload {
+  const payload = normalMonitoringPayload();
+  payload.simulation = {
+    drill: true,
+    sensor_source: "mock",
+    ppg_source: "hardware",
+    scenario: "demo_trip_fall"
+  };
   return payload;
 }

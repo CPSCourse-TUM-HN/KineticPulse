@@ -69,6 +69,7 @@ export default function MonitoringDashboard({
           <a href="#detection">Detection</a>
           <a href="#events">Events</a>
           <Link href="/sessions">Live sessions</Link>
+          <Link href="/control">Scenario control</Link>
         </nav>
         <button
           className="mobile-menu-button"
@@ -85,10 +86,19 @@ export default function MonitoringDashboard({
           <a href="#detection" onClick={() => setMenuOpen(false)}>Detection</a>
           <a href="#events" onClick={() => setMenuOpen(false)}>Events</a>
           <Link href="/sessions" onClick={() => setMenuOpen(false)}>Live sessions</Link>
+          <Link href="/control" onClick={() => setMenuOpen(false)}>Scenario control</Link>
         </nav>
       </header>
 
       <main className="dashboard-shell" id="overview">
+        {model?.simulation.drill ? (
+          <div className="drill-banner" role="status">
+            <strong>Drill in progress.</strong> A scripted scenario
+            {model.simulation.scenario ? ` (${words(model.simulation.scenario)})` : ""} is
+            driving this dashboard from the <Link href="/control">scenario control</Link>{" "}
+            panel. Nothing on this page is a measurement.
+          </div>
+        ) : null}
         <section className="dashboard-intro">
           <div>
             <p className="eyebrow">Edge-AI safety monitoring</p>

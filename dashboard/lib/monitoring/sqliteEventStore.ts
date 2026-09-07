@@ -33,6 +33,8 @@ interface InsertRow {
   system_status: string;
   device_connection_status: string;
   heart_rate_bpm: number | null;
+  /** 1 when the BPM came from the synthetic PPG source, not the MAX30102. */
+  heart_rate_simulated: number;
   imu_state: string;
   vision_state: string;
   fall_confidence: number | null;
@@ -70,6 +72,7 @@ const INSERT_EVENT_SQL = `INSERT INTO monitoring_events (
   system_status,
   device_connection_status,
   heart_rate_bpm,
+  heart_rate_simulated,
   imu_state,
   vision_state,
   fall_confidence,
@@ -92,6 +95,7 @@ const INSERT_EVENT_SQL = `INSERT INTO monitoring_events (
   @system_status,
   @device_connection_status,
   @heart_rate_bpm,
+  @heart_rate_simulated,
   @imu_state,
   @vision_state,
   @fall_confidence,
@@ -198,6 +202,7 @@ export class SQLiteEventStore implements EventStore {
       system_status: model.system.connection,
       device_connection_status: model.sensor.connection,
       heart_rate_bpm: model.heartRate.bpm,
+      heart_rate_simulated: model.heartRate.simulated ? 1 : 0,
       imu_state: model.motion.state,
       vision_state: model.vision.state,
       fall_confidence: model.fall.confidence,

@@ -200,15 +200,33 @@ export default function MonitoringOverview({
             <SectionHeader
               kicker="Live signal"
               title="Vital & fall overview"
-              meta={model.heartRate.status === "unavailable" ? "Sensor unavailable" : "Last ~3 min"}
+              meta={
+                model.heartRate.simulated
+                  ? "Simulated pulse"
+                  : model.heartRate.status === "unavailable"
+                    ? "Sensor unavailable"
+                    : "Last ~3 min"
+              }
             />
+            {model.heartRate.simulated ? (
+              <p className="simulated-hr-notice" role="status">
+                <strong>Simulated heart rate.</strong> The pulse sensor is not
+                supplying data, so this BPM is synthetic: pulse loss and cardiac
+                alerts cannot be detected. Do not read it as a vital sign.
+              </p>
+            ) : null}
             <div className="signal-layout">
               <div
-                className={`heart-visual ${model.heartRate.status === "pulse_lost" ? "critical" : model.heartRate.status === "unavailable" ? "muted" : ""}`}
+                className={`heart-visual ${model.heartRate.status === "pulse_lost" ? "critical" : model.heartRate.status === "unavailable" ? "muted" : ""} ${model.heartRate.simulated ? "simulated" : ""}`}
               >
                 <div className="heart-heading">
                   <span className="signal-icon"><HeartPulse /></span>
                   <div><span>Heart rate</span><strong>{heartStatusLabel}</strong></div>
+                  {model.heartRate.simulated ? (
+                    <span className="simulated-badge" title="Synthetic waveform, not a measured pulse">
+                      Simulated
+                    </span>
+                  ) : null}
                 </div>
                 <div className="heart-reading">
                   {model.heartRate.bpm === null ? (
@@ -216,7 +234,10 @@ export default function MonitoringOverview({
                       {model.heartRate.status === "pulse_lost" ? "Pulse lost" : "No signal"}
                     </strong>
                   ) : (
-                    <><strong>{model.heartRate.bpm}</strong><span>BPM</span></>
+                    <>
+                      <strong>{model.heartRate.bpm}</strong>
+                      <span>{model.heartRate.simulated ? "BPM (simulated)" : "BPM"}</span>
+                    </>
                   )}
                 </div>
                 <HeartRateSparkline samples={vitals} bpm={model.heartRate.bpm} />

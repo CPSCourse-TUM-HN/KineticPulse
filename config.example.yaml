@@ -102,6 +102,20 @@ wristband:
                            #   on BLE, or {"type":"hr","bpm":...} on TCP).
   ppg_sample_rate_hz: 100  # MAX30102 sample rate (typical: 50/100/200 Hz).
 
+  # --- Heart-rate source --------------------------------------------------
+  # hardware  : BPM comes from the wristband (raw PPG above, or pre-computed).
+  # simulated : the MAX30102 is dead/absent. A synthetic resting waveform
+  #             (kineticpulse.sensors.ppg_sim) stands in so the PPG -> BPM ->
+  #             fusion -> dashboard path keeps running; motion still comes
+  #             from the real transport.
+  #             BENCH ONLY. Pulse loss and the cardiac tier cannot fire in
+  #             this mode, and the heart rate is labelled "simulated" in the
+  #             logs, the monitoring payload, the dashboard and every alert.
+  ppg_source: hardware     # hardware | simulated
+  ppg_sim_resting_bpm: 72  # baseline BPM when ppg_source=simulated
+  ppg_sim_hrv_sd_ms: 22    # beat-to-beat variability (healthy resting SDNN)
+  ppg_sim_seed: 0          # RNG seed; keeps bench runs reproducible
+
 thresholds:
   # Heart-rate bands (BPM)
   hr_resting_low: 50       # below = bradycardia (PRD Scenario C)
@@ -192,6 +206,17 @@ monitoring:
   enabled: true
   host: "0.0.0.0"
   port: 8790               # GET http://<host>:8790/monitoring
+
+  # --- Scenario control panel ---------------------------------------------
+  # Lets the dashboard switch the synthetic scenario at runtime
+  # (POST /control/scenario) instead of restarting the pipeline.
+  #
+  # OFF BY DEFAULT. Activating a Tier-2 scenario runs the real emergency
+  # path: webhooks to alerts.webhooks, a WebRTC session, the voice prompt.
+  # It also only works with --mock-ble (synthetic sensors); against real
+  # hardware the panel reports itself unavailable. Bench use only - and bind
+  # `host` above to 127.0.0.1 if the Jetson shares a network.
+  control_enabled: false
 
 logging:
   level: INFO              # DEBUG | INFO | WARNING | ERROR

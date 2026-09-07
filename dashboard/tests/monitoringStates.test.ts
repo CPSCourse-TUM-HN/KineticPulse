@@ -8,7 +8,7 @@ describe("monitoring edge states", () => {
 
     expect(model.system.connection).toBe("degraded");
     expect(model.sensor.connection).toBe("disconnected");
-    expect(model.heartRate).toEqual({ bpm: null, status: "unavailable" });
+    expect(model.heartRate).toEqual({ bpm: null, status: "unavailable", simulated: false });
     expect(model.motion.state).toBe("unknown");
     expect(model.emergency.level).toBe("none");
     expect(model.fall.detected).toBe(false);

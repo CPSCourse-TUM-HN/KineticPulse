@@ -78,5 +78,17 @@ export const SQLITE_MIGRATIONS: readonly SQLiteMigration[] = [
       `CREATE UNIQUE INDEX idx_monitoring_events_source_event
        ON monitoring_events(source, source_event_id)`
     ]
+  },
+  {
+    version: 3,
+    description: "Record whether the stored heart rate was simulated rather than measured",
+    statements: [
+      // Without this column a bench run with wristband.ppg_source=simulated
+      // leaves synthetic BPM in the history indistinguishable from measured
+      // pulse. Backfilled to 0: every pre-existing row predates the mode.
+      `ALTER TABLE monitoring_events
+       ADD COLUMN heart_rate_simulated INTEGER NOT NULL DEFAULT 0
+       CHECK (heart_rate_simulated IN (0, 1))`
+    ]
   }
 ];

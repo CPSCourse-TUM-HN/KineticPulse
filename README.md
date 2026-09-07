@@ -186,6 +186,8 @@ Sensors           kineticpulse/sensors/tcp.py        TcpSensorServer (production
                   kineticpulse/sensors/mock.py       MockSensorClient (transport-agnostic)
                   kineticpulse/sensors/parser.py     SensorEvent + binary BLE decoders
                   kineticpulse/sensors/ppg.py        MAX30102 raw-PPG -> BPM
+                  kineticpulse/sensors/ppg_sim.py    synthetic PPG (bench only)
+                  kineticpulse/control.py            runtime scenario control (bench only)
         │
         ▼
 Fusion            kineticpulse/fusion/rules.py       Pose / accel / HR signature primitives
@@ -264,6 +266,97 @@ defaults to `<II` per sample (little-endian uint32 IR then uint32 Red,
 Set `wristband.has_ppg_raw: false` if the firmware sends pre-computed
 HR (BPM) directly instead of raw PPG bursts. Useful for bring-up testing
 with any off-the-shelf compliant HR monitor (Polar strap, etc.).
+
+### Bench mode with a dead pulse sensor
+
+When the MAX30102 is broken or not yet mounted, the firmware stops
+sending `hr` / `ppg` lines entirely. The Jetson then sees no pulse
+sample, `pulse_lost_s` grows without bound, and fusion parks on the
+`PULSE_LOST` cardiac-arrest indicator — which makes the rig useless for
+working on vision, fusion tiers or the dashboard.
+
+`wristband.ppg_source: simulated` fills the gap. A synthetic resting
+waveform ([kineticpulse/sensors/ppg_sim.py](kineticpulse/sensors/ppg_sim.py))
+is pushed through the *real* `PpgProcessor`, so the PPG → BPM → fusion →
+dashboard path keeps running end to end. Motion still comes from the
+hardware transport; only the pulse is substituted.
+
+```yaml
+wristband:
+  ppg_source: simulated     # hardware | simulated
+  ppg_sim_resting_bpm: 72
+  ppg_sim_hrv_sd_ms: 22     # beat-to-beat variability (resting SDNN)
+```
+
+**This is a bench mode, not a fallback.** `latest_hr_bpm` drives a
+cardiac-arrest tier, so a synthetic "normal" BPM that could pass for a
+measured one would suppress `PULSE_LOST` forever — the system would look
+healthy while being structurally unable to report a stopped heart. The
+mode therefore labels itself everywhere the number surfaces:
+
+| Surface | Label |
+|---|---|
+| Logs | `WARNING` at startup, repeated every 60 s |
+| `GET /monitoring` | `sensor.ppg_source: "simulated"`, `snapshot.hr_simulated: true` |
+| Dashboard | Hatched HR tile, "Simulated" badge, "BPM (simulated)", banner |
+| Alert webhooks | `vitals.heart_rate_source`, `vitals.heart_rate_simulated` |
+| Caregiver event feed | Warning-severity "Heart rate is simulated" entry |
+| Event history (SQLite) | `monitoring_events.heart_rate_simulated` |
+
+Do not remove those labels, and do not run a build with
+`ppg_source: simulated` in front of anyone who would read the heart rate
+as real. Covered by [tests/test_ppg_sim.py](tests/test_ppg_sim.py).
+
+### Scenario control panel
+
+The mock sensor client can replay any PRD scenario, but the choice used to be
+fixed at process start (`--mock-ble-scenario` / `--demo`), so testing four
+scenarios meant four restarts and four model reloads. The control panel makes
+the scenario switchable at runtime:
+
+```yaml
+monitoring:
+  control_enabled: true    # off by default; see the warning below
+```
+
+```bash
+python -m kineticpulse.main --config config.yaml --mock-ble --mock-stt --no-camera
+# then, in the dashboard: http://localhost:3000/control
+```
+
+Pressing a button replays that scenario from t=0. The synthetic telemetry and
+the scripted posture loop share one
+[`ScenarioClock`](kineticpulse/sensors/mock.py), so vision and sensors restart
+together instead of drifting apart. The panel shows the live fusion tier next
+to the buttons, so you can watch a playbook escalate as it plays.
+
+Straight HTTP works too, when the dashboard is not running:
+
+```bash
+curl -s http://127.0.0.1:8790/control | jq            # state + catalogue
+curl -sX POST -d '{"scenario":"trip-fall"}' http://127.0.0.1:8790/control/scenario
+curl -sX POST http://127.0.0.1:8790/control/restart   # replay from t=0
+curl -sX POST http://127.0.0.1:8790/control/reset     # back to resting
+```
+
+**Why it is off by default.** Activating a scenario injects telemetry that the
+fusion engine treats as real, so a Tier-2 scenario runs the *whole* emergency
+path: webhooks fire to whatever `alerts.webhooks` points at, a WebRTC session
+opens, the voice prompt plays. Point the config at a test endpoint first. The
+guard rails:
+
+| Guard | Behaviour |
+|---|---|
+| `monitoring.control_enabled` | Defaults to `false`; the endpoints return `403` until set |
+| Applicability | Only works with `--mock-ble`; against real hardware the panel reports `409` and renders itself disabled |
+| Tier-2 buttons | Two-step in the UI — the first press arms, the second dispatches |
+| Audit | Every activation logs at `WARNING` and lands in the caregiver event feed as a drill |
+| Provenance | `simulation.drill` on `GET /monitoring` **and** on every alert webhook |
+| Dashboard | A drill banner on the caregiver dashboard: "Nothing on this page is a measurement" |
+| Network | No CORS headers; the browser reaches it only via the dashboard's own server-side route. Bind `monitoring.host` to `127.0.0.1` on a shared network |
+
+The endpoints are unauthenticated, so `control_enabled: true` belongs on a
+bench, never on a deployed unit.
 
 ### Degraded operation without the IMU
 
@@ -513,7 +606,8 @@ KineticPulse/
 │   │   ├── ble.py               # bleak BLE client (legacy / fallback transport)
 │   │   ├── mock.py              # MockSensorClient - scripted PRD scenarios, no hardware
 │   │   ├── parser.py            # SensorEvent + binary BLE decoders
-│   │   └── ppg.py               # MAX30102 raw PPG decoder + on-Jetson HR processor
+│   │   ├── ppg.py               # MAX30102 raw PPG decoder + on-Jetson HR processor
+│   │   └── ppg_sim.py           # synthetic PPG for a dead MAX30102 (labelled, bench only)
 │   ├── voice/
 │   │   ├── stt.py               # faster-whisper STT + MockStt
 │   │   ├── prompts.py           # pyttsx3 voice prompt player
@@ -549,6 +643,8 @@ KineticPulse/
 │   ├── test_fusion_action_logits.py    # ActionLogits ↔ fusion-engine wiring (8)
 │   ├── test_temporal_stabilisation.py  # EMA + hysteresis (6)
 │   ├── test_ppg.py                     # MAX30102 raw decoder + BPM estimator (10)
+│   ├── test_ppg_sim.py                 # synthetic PPG waveform + simulated-HR labelling (24)
+│   ├── test_control.py                 # scenario clock, control gating, /control endpoints (30)
 │   ├── test_tcp_sensor.py              # TcpSensorServer decoders + reconnection (4)
 │   ├── test_detector_smoke.py          # FallDetector on a real image (auto-skipped when no weights)
 │   ├── test_pipeline_smoke.py          # end-to-end orchestrator + real TCP loopback (3)

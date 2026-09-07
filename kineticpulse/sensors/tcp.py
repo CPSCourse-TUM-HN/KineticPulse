@@ -157,6 +157,11 @@ def _parse_event(
 class TcpSensorServer:
     """Single-tenant TCP server for wristband telemetry."""
 
+    #: Real telemetry from the wristband, as opposed to
+    #: :class:`~kineticpulse.sensors.mock.MockSensorClient`. Read by the
+    #: monitoring payload's ``simulation`` block.
+    sensor_source = "hardware"
+
     def __init__(
         self,
         cfg: WristbandConfig,
