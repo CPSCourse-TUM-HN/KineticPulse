@@ -21,6 +21,13 @@ class CameraConfig:
     width: int = 1280
     height: int = 720
     fps: int = 30
+    # UVC webcams expose 720p+ at full frame rate only on MJPG; the
+    # uncompressed YUYV mode runs out of USB bandwidth and the driver
+    # silently caps the rate -- measured 9 FPS vs 29 FPS at 1280x720 on the
+    # Jetson's UGREEN cam. That starves the temporal head (its 30-frame clip
+    # would span 3 s instead of 1 s) and delays fall alerts by seconds. Set
+    # to "" / "none" to let the driver negotiate (raw YUYV, non-USB sources).
+    fourcc: str = "MJPG"
 
 
 @dataclass

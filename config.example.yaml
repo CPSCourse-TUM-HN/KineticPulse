@@ -12,6 +12,11 @@ camera:
   width: 1280
   height: 720
   fps: 30
+  fourcc: MJPG             # MJPG | YUYV | "" (let the driver choose)
+                           # UVC webcams only reach 720p+ at full frame rate
+                           # on MJPG. Measured on the Jetson's UGREEN cam
+                           # (0c45:2283) through the runtime capture thread:
+                           # 1280x720 YUYV = 8.8 FPS, MJPG = 28.7 FPS.
 
 detector:
   # 4-class checkpoint (fallen / falling / stand / sitting). Use the .onnx
