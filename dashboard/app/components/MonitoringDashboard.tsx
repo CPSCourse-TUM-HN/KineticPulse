@@ -98,6 +98,34 @@ export default function MonitoringDashboard({
             driving this dashboard from the <Link href="/control">scenario control</Link>{" "}
             panel. Nothing on this page is a measurement.
           </div>
+        ) : model?.simulation.sensorSource === "mock" ? (
+          <div className="drill-banner" role="status">
+            <strong>Synthetic sensors.</strong> Wristband telemetry is being
+            generated, not measured — the runtime was started with{" "}
+            <code>--mock-ble</code>. Heart rate and motion on this page are not
+            this person&apos;s vitals.
+          </div>
+        ) : null}
+        {model && model.runtime.health !== "ok" && model.runtime.health !== "unknown" ? (
+          <div
+            className={`runtime-banner ${model.runtime.health}`}
+            role={model.runtime.health === "critical" ? "alert" : "status"}
+          >
+            <strong>
+              {model.runtime.accelerator === "cpu"
+                ? "Edge runtime is on the CPU."
+                : "Edge runtime is slow."}
+            </strong>{" "}
+            Vision is processing{" "}
+            {model.runtime.visionFps === null
+              ? "an unknown number of"
+              : model.runtime.visionFps}{" "}
+            frames per second. A fall lasts under a second, so detection may
+            miss events at this rate.
+            {model.runtime.accelerator === "cpu"
+              ? " Restart the runtime through the project venv so it reaches the GPU."
+              : ""}
+          </div>
         ) : null}
         <section className="dashboard-intro">
           <div>

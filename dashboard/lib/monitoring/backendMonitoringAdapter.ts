@@ -92,6 +92,14 @@ export function mapBackendMonitoringPayload(payload: MonitoringWirePayload): Mon
     },
     voiceVerification: { status: payload.voice.status },
     alertDispatch: { status: payload.alert_dispatch.status },
+    runtime: {
+      health: payload.runtime?.health ?? "unknown",
+      accelerator: payload.runtime?.accelerator ?? "unknown",
+      acceleratorDevice: payload.runtime?.accelerator_device ?? null,
+      visionFps: payload.runtime?.vision_fps ?? null,
+      detectorBackend: payload.runtime?.detector_backend ?? null,
+      poseBackend: payload.runtime?.pose_backend ?? null
+    },
     simulation: {
       drill: payload.simulation?.drill === true,
       sensorSource: payload.simulation?.sensor_source ?? "hardware",

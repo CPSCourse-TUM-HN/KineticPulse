@@ -218,6 +218,21 @@ monitoring:
   # `host` above to 127.0.0.1 if the Jetson shares a network.
   control_enabled: false
 
+  # --- Detection feed -----------------------------------------------------
+  # Publishes the annotated overlay (posture box, COCO-17 skeleton, motion and
+  # fusion panels) as MJPEG at GET /preview.mjpg, which is what the
+  # dashboard's Detection panel renders. GET /preview.jpg serves one frame.
+  #
+  # OFF BY DEFAULT. Unlike the vitals envelope this is live video of a
+  # person's home on an unauthenticated port: anything that can reach it can
+  # watch. Bind `host` above to 127.0.0.1 unless the dashboard is remote.
+  # A feed that stops producing is reported unavailable and the stream is
+  # closed, so the panel says so instead of showing a frozen room.
+  preview_stream: false
+  preview_stream_every: 1        # encode every Nth processed frame
+  preview_stream_quality: 72     # JPEG quality 1-100; ~6 ms/frame at 720p
+  preview_stream_max_clients: 4  # concurrent viewers before 503
+
 logging:
   level: INFO              # DEBUG | INFO | WARNING | ERROR
   json: false

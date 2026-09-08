@@ -28,6 +28,9 @@ const GROUP_ORDER: Array<ScenarioOption["group"]> = ["baseline", "scenario", "pl
 function tierLabel(tier: string): string {
   const labels: Record<string, string> = {
     none: "No escalation",
+    // tier_0_dismiss is a real fusion outcome, not just a scenario target —
+    // without it the live readout showed the raw enum.
+    tier_0_dismiss: "Tier 0 — dismissed",
     tier_1_verify: "Tier 1 — verify",
     tier_2_seizure: "Tier 2 — seizure",
     tier_2_cardiac: "Tier 2 — cardiac"

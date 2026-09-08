@@ -12,10 +12,24 @@ Also serves the bench control surface behind ``monitoring.control_enabled``:
 * ``POST /control/restart``   - replay the active scenario
 * ``POST /control/reset``     - back to the quiet baseline
 
-These are unauthenticated, so they stay disabled by default and the reasons
-are spelled out in :mod:`kineticpulse.control`. No CORS headers are emitted:
-the dashboard reaches them from its own server-side API route, and a browser
-on the LAN should not be able to page a caregiver.
+...and the detection feed behind ``monitoring.preview_stream``:
+
+* ``GET /preview.mjpg``  - the annotated overlay as ``multipart/x-mixed-replace``,
+  which an ``<img>`` renders natively; this is what the dashboard's Detection
+  panel shows
+* ``GET /preview.jpg``   - the newest single frame, for a poster image or a
+  client that cannot hold a stream open
+
+Both read :class:`~kineticpulse.vision.frame_bus.PreviewFrameBus`, which the
+preview overlay fills. A feed that has stopped producing is reported as ``503``
+and the stream is closed rather than left showing the last frame: a still image
+of a calm room is the one thing a stopped monitor must not look like.
+
+These are all unauthenticated, so they stay disabled by default and the reasons
+are spelled out in :mod:`kineticpulse.control` and in ``config.example.yaml``.
+No CORS headers are emitted: the dashboard reaches them from its own
+server-side API route, and a browser on the LAN should not be able to page a
+caregiver - or watch one.
 """
 
 from __future__ import annotations
@@ -31,6 +45,7 @@ from kineticpulse.control import ControlError, ScenarioController
 from kineticpulse.fusion.engine import FusionSnapshot
 from kineticpulse.runtime_status import CaregiverRuntimeStatus
 from kineticpulse.sensors.ppg_sim import PPG_SOURCE_HARDWARE, PPG_SOURCE_SIMULATED
+from kineticpulse.vision.frame_bus import PreviewFrameBus
 from kineticpulse.utils.logging import get_logger
 
 log = get_logger(__name__)
@@ -80,12 +95,24 @@ def build_monitoring_payload(
     events: Optional[List[Dict[str, Any]]] = None,
     published_at_ms: Optional[int] = None,
     control: Optional[ScenarioController] = None,
+    runtime: Optional[Dict[str, Any]] = None,
+    preview: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build the JSON envelope consumed by the Next.js real-mode adapter.
 
     ``control`` adds the scenario-panel state and the ``simulation`` block.
     Both are always present when a controller is supplied - a marker that
     only appears during a drill is a marker nobody checks for.
+
+    ``runtime`` carries vision throughput and the accelerator in use. It is on
+    the caregiver payload rather than buried in the logs because a CPU
+    fallback is a *safety* regression: the same pipeline runs at ~16 FPS on the
+    GPU and ~0.65 FPS on the CPU, and at that rate it steps over a fall.
+
+    ``preview`` describes the detection feed - see :func:`preview_payload`. It
+    is always present so the dashboard can tell "off in the config" apart from
+    "on, but no frames are arriving", and render the reason either way instead
+    of a broken image.
     """
     wire_timestamp_ms = (
         published_at_ms
@@ -97,6 +124,10 @@ def build_monitoring_payload(
     hr_simulated = ppg_source == PPG_SOURCE_SIMULATED
     event_list = list(events or [])
     control_block = control.state().as_json() if control is not None else None
+    runtime_block = runtime or {"health": "unknown", "accelerator": "unknown",
+                                "accelerator_device": None, "vision_fps": None,
+                                "detector_backend": None, "pose_backend": None}
+    preview_block = preview if preview is not None else preview_payload(None)
     simulation_block = (
         control.simulation_payload(ppg_source=ppg_source)
         if control is not None
@@ -136,6 +167,8 @@ def build_monitoring_payload(
             "events": event_list,
             "simulation": simulation_block,
             "control": control_block,
+            "runtime": runtime_block,
+            "preview": preview_block,
         }
 
     return {
@@ -168,6 +201,68 @@ def build_monitoring_payload(
         "events": event_list,
         "simulation": simulation_block,
         "control": control_block,
+        "runtime": runtime_block,
+        "preview": preview_block,
+    }
+
+
+#: Paths the dashboard uses for the detection feed. Published in the payload
+#: rather than hard-coded in the dashboard so one side can move without the
+#: other guessing.
+PREVIEW_STREAM_PATH = "/preview.mjpg"
+PREVIEW_FRAME_PATH = "/preview.jpg"
+
+
+def preview_payload(
+    frames: Optional[PreviewFrameBus],
+    *,
+    clients: int = 0,
+    max_clients: int = 0,
+) -> Dict[str, Any]:
+    """Describe the detection feed for the dashboard's Detection panel.
+
+    Shaped like the ``control`` block on purpose: ``enabled`` is what the
+    config says, ``available`` is whether frames are actually arriving, and
+    ``reason`` explains a False. The panel needs all three - "the operator
+    turned this off" and "the camera stopped" call for different words on
+    screen, and neither should be guessed from a failed image load.
+    """
+    if frames is None:
+        return {
+            "enabled": False,
+            "available": False,
+            "reason": (
+                "The detection feed is off in the runtime config "
+                "(monitoring.preview_stream)."
+            ),
+            "stream_path": PREVIEW_STREAM_PATH,
+            "frame_path": PREVIEW_FRAME_PATH,
+            "fps": None,
+            "clients": 0,
+            "max_clients": 0,
+        }
+
+    frame = frames.latest()
+    if frame is None:
+        available, reason = False, "Waiting for the first annotated frame."
+    elif frame.age_s() > frames.stale_after_s:
+        available = False
+        reason = (
+            f"No frame for {frame.age_s():.0f}s - the vision pipeline has "
+            "stopped producing."
+        )
+    else:
+        available, reason = True, ""
+
+    return {
+        "enabled": True,
+        "available": available,
+        "reason": reason,
+        "stream_path": PREVIEW_STREAM_PATH,
+        "frame_path": PREVIEW_FRAME_PATH,
+        "fps": None if frame is None or frame.fps is None else round(frame.fps, 1),
+        "clients": clients,
+        "max_clients": max_clients,
     }
 
 
@@ -199,11 +294,19 @@ def _scenario_from_body(body: bytes) -> str:
 
 
 class MonitoringPublisher:
-    """Tiny asyncio HTTP server: ``GET /monitoring``, ``/control`` (+ ``/healthz``)."""
+    """Tiny asyncio HTTP server: ``GET /monitoring``, ``/control``,
+    ``/preview.mjpg`` (+ ``/healthz``)."""
 
     #: Cap on a control request body. The largest legitimate one is a few
     #: dozen bytes of JSON, so anything bigger is a mistake or an attack.
     MAX_BODY_BYTES = 4096
+
+    #: How often a stream checks the bus for a new frame. The bus holds one
+    #: slot, so this only has to be short relative to a frame interval: at 8 ms
+    #: a 17 FPS pipeline (59 ms/frame) is passed through without adding a
+    #: visible frame of latency, and an idle stream costs 125 cheap wakeups a
+    #: second rather than a blocked thread.
+    PREVIEW_POLL_S = 0.008
 
     def __init__(
         self,
@@ -215,6 +318,8 @@ class MonitoringPublisher:
         sensors: Any = None,
         runtime_status: Optional[CaregiverRuntimeStatus] = None,
         control: Optional[ScenarioController] = None,
+        frames: Optional[PreviewFrameBus] = None,
+        preview_max_clients: int = 4,
     ) -> None:
         self.host = host
         self.port = port
@@ -223,6 +328,9 @@ class MonitoringPublisher:
         self.sensors = sensors
         self.runtime_status = runtime_status or CaregiverRuntimeStatus()
         self.control = control
+        self.frames = frames
+        self.preview_max_clients = max(1, int(preview_max_clients))
+        self._preview_clients = 0
         self._server: Optional[asyncio.AbstractServer] = None
         self._stop = asyncio.Event()
 
@@ -238,6 +346,14 @@ class MonitoringPublisher:
                 "Activating a scenario injects synthetic telemetry and can fire "
                 "real alerts. Bench use only.",
                 socks,
+            )
+        if self.frames is not None:
+            log.warning(
+                "Detection feed is ENABLED on %s (GET %s). This is "
+                "unauthenticated live video of the monitored room: anything "
+                "that can reach this port can watch. Bind monitoring.host to "
+                "127.0.0.1 unless the dashboard is remote.",
+                socks, PREVIEW_STREAM_PATH,
             )
         async with self._server:
             try:
@@ -302,6 +418,14 @@ class MonitoringPublisher:
             await self._respond(writer, 200, _json(self.control.state().as_json()))
             return
 
+        if path == PREVIEW_FRAME_PATH:
+            await self._serve_preview_frame(writer)
+            return
+
+        if path == PREVIEW_STREAM_PATH:
+            await self._stream_preview(writer)
+            return
+
         if path != "/monitoring":
             await self._respond(writer, 404, b'{"ok":false,"error":"not_found"}')
             return
@@ -319,9 +443,136 @@ class MonitoringPublisher:
                     alert_dispatch_status=status.alert_dispatch_status,
                     events=status.events_payload(),
                     control=self.control,
+                    runtime=status.runtime_payload(),
+                    preview=preview_payload(
+                        self.frames,
+                        clients=self._preview_clients,
+                        max_clients=self.preview_max_clients,
+                    ),
                 )
             ),
         )
+
+    # -- detection feed --------------------------------------------------- #
+
+    async def _serve_preview_frame(self, writer: asyncio.StreamWriter) -> None:
+        """``GET /preview.jpg`` - the newest overlay frame, or why there isn't one.
+
+        Serves only a *fresh* frame. Handing back the last one the pipeline
+        produced would let a poster image outlive the pipeline that drew it,
+        which is the failure this whole panel exists to make visible.
+        """
+        if self.frames is None:
+            await self._respond(
+                writer, 404, b'{"ok":false,"error":"preview_not_enabled"}'
+            )
+            return
+        frame = self.frames.fresh()
+        if frame is None:
+            await self._respond(
+                writer,
+                503,
+                _json({
+                    "ok": False,
+                    "error": "preview_unavailable",
+                    "message": preview_payload(self.frames)["reason"],
+                }),
+            )
+            return
+        await self._respond(
+            writer, 200, frame.jpeg, content_type="image/jpeg"
+        )
+
+    async def _stream_preview(self, writer: asyncio.StreamWriter) -> None:
+        """``GET /preview.mjpg`` - the overlay as ``multipart/x-mixed-replace``.
+
+        An ``<img src>`` renders this natively, so the dashboard needs no
+        player, no WebRTC negotiation and no polling: one connection, and the
+        browser swaps each part in as it arrives.
+
+        The stream ends - rather than stalling - as soon as the pipeline stops
+        feeding it, so the panel's ``onError`` fires and the caregiver is told
+        the feed stopped instead of watching a frozen room.
+        """
+        if self.frames is None:
+            await self._respond(
+                writer, 404, b'{"ok":false,"error":"preview_not_enabled"}'
+            )
+            return
+        if self._preview_clients >= self.preview_max_clients:
+            # A left-open tab per device would otherwise pin one JPEG-encoding
+            # copy of every frame each; the cap keeps the feed from crowding
+            # out the actual monitor.
+            log.info(
+                "Detection feed refused: %d/%d clients already streaming.",
+                self._preview_clients, self.preview_max_clients,
+            )
+            await self._respond(
+                writer,
+                503,
+                b'{"ok":false,"error":"too_many_preview_clients"}',
+            )
+            return
+
+        boundary = "kineticpulseframe"
+        headers = [
+            "HTTP/1.1 200 OK",
+            "Connection: close",
+            "Cache-Control: no-store, no-cache, must-revalidate",
+            "Pragma: no-cache",
+            f"Content-Type: multipart/x-mixed-replace; boundary={boundary}",
+        ]
+        separator = f"--{boundary}\r\n".encode("latin-1")
+        deadline = self.frames.stale_after_s
+        last_seq = 0
+        sent = 0
+
+        self._preview_clients += 1
+        try:
+            writer.write(("\r\n".join(headers) + "\r\n\r\n").encode("latin-1"))
+            await writer.drain()
+            idle_since = time.monotonic()
+
+            while not self._stop.is_set():
+                frame = self.frames.fresh()
+                if frame is None or frame.seq == last_seq:
+                    if time.monotonic() - idle_since > deadline:
+                        log.info(
+                            "Detection feed closed after %.0fs without a new "
+                            "frame (%d sent).", deadline, sent,
+                        )
+                        break
+                    await asyncio.sleep(self.PREVIEW_POLL_S)
+                    continue
+
+                last_seq = frame.seq
+                idle_since = time.monotonic()
+                writer.write(
+                    separator
+                    + b"Content-Type: image/jpeg\r\n"
+                    + f"Content-Length: {len(frame.jpeg)}\r\n\r\n".encode("latin-1")
+                    + frame.jpeg
+                    + b"\r\n"
+                )
+                # drain() is the backpressure signal *and* the disconnect
+                # signal: a closed tab raises here rather than silently
+                # buffering frames nobody will read.
+                await writer.drain()
+                sent += 1
+
+        except (ConnectionResetError, BrokenPipeError):
+            pass                       # caregiver closed the tab; not an error
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:       # pragma: no cover - transport oddities
+            log.debug("Detection feed ended: %s", exc)
+        finally:
+            self._preview_clients -= 1
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
 
     async def _handle_post(
         self, writer: asyncio.StreamWriter, path: str, body: bytes
@@ -404,6 +655,7 @@ class MonitoringPublisher:
             405: "Method Not Allowed",
             409: "Conflict",
             413: "Payload Too Large",
+            503: "Service Unavailable",
         }.get(status, "OK")
         headers = [
             f"HTTP/1.1 {status} {reason}",

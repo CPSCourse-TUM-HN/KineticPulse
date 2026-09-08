@@ -3,7 +3,13 @@ import React from "react";
 import { describe, expect, it } from "vitest";
 import MonitoringDashboard from "../app/components/MonitoringDashboard";
 import { mapBackendMonitoringPayload } from "../lib/monitoring/backendMonitoringAdapter";
-import { drillMonitoringPayload, normalMonitoringPayload } from "./monitoringFixture";
+import {
+  cpuFallbackPayload,
+  degradedRuntimePayload,
+  drillMonitoringPayload,
+  normalMonitoringPayload,
+  syntheticSensorPayload
+} from "./monitoringFixture";
 
 describe("MonitoringDashboard", () => {
   it("renders the main dashboard from a normalized model", () => {
@@ -46,5 +52,61 @@ describe("MonitoringDashboard", () => {
     );
 
     expect(screen.queryByText(/Drill in progress/i)).not.toBeInTheDocument();
+  });
+
+  it("warns about synthetic sensors even when no drill is running", () => {
+    // --mock-ble at the resting baseline sets drill=false, which previously
+    // rendered generated vitals with no marker at all.
+    render(
+      <MonitoringDashboard
+        model={mapBackendMonitoringPayload(syntheticSensorPayload())}
+        loading={false}
+        error={null}
+      />
+    );
+
+    expect(screen.getByText(/Synthetic sensors/i)).toBeInTheDocument();
+    expect(screen.getByText(/not\s+this person/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Drill in progress/i)).not.toBeInTheDocument();
+  });
+
+  it("banners the CPU fallback as a detection risk, not just a slowdown", () => {
+    render(
+      <MonitoringDashboard
+        model={mapBackendMonitoringPayload(cpuFallbackPayload())}
+        loading={false}
+        error={null}
+      />
+    );
+
+    const banner = screen.getByRole("alert");
+    expect(banner).toHaveTextContent(/on the CPU/i);
+    expect(banner).toHaveTextContent(/may\s+miss events/i);
+  });
+
+  it("banners a slow GPU run as degraded rather than critical", () => {
+    render(
+      <MonitoringDashboard
+        model={mapBackendMonitoringPayload(degradedRuntimePayload())}
+        loading={false}
+        error={null}
+      />
+    );
+
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByText(/Edge runtime is slow/i)).toBeInTheDocument();
+  });
+
+  it("shows the edge frame rate on a healthy run and no runtime banner", () => {
+    render(
+      <MonitoringDashboard
+        model={mapBackendMonitoringPayload(normalMonitoringPayload())}
+        loading={false}
+        error={null}
+      />
+    );
+
+    expect(screen.getByText("16.4 FPS")).toBeInTheDocument();
+    expect(screen.queryByText(/Edge runtime/i)).not.toBeInTheDocument();
   });
 });

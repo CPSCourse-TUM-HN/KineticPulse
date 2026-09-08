@@ -232,6 +232,22 @@ class MonitoringConfig:
     # the Jetson is on a shared network.
     control_enabled: bool = False
 
+    # --- Detection feed ------------------------------------------------------
+    # Publishes the annotated preview overlay (posture box, skeleton, motion
+    # and fusion panels) as MJPEG at GET /preview.mjpg, which is what the
+    # dashboard's Detection panel renders.
+    #
+    # OFF BY DEFAULT: unlike the vitals envelope, this is live video of a
+    # person's home on an unauthenticated port. Turn it on for a bench or a
+    # deployment where the dashboard is the only reachable client, and bind
+    # `host` to 127.0.0.1 if the Jetson shares a network. It also costs a JPEG
+    # encode per frame on a background thread (~6 ms at 1280x720 on an Orin),
+    # which the render path drops rather than waits for.
+    preview_stream: bool = False
+    preview_stream_every: int = 1     # encode every Nth processed frame
+    preview_stream_quality: int = 72  # JPEG quality, 1-100
+    preview_stream_max_clients: int = 4
+
 
 @dataclass
 class RuntimeConfig:

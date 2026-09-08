@@ -478,3 +478,104 @@ async def test_unknown_control_action_and_missing_controller_are_404() -> None:
 
 def test_control_is_disabled_in_the_default_config() -> None:
     assert MonitoringConfig().control_enabled is False
+
+
+# --------------------------------------------------------------------------- #
+# Runtime health reaches the dashboard
+# --------------------------------------------------------------------------- #
+
+
+def test_runtime_payload_grades_the_cpu_fallback_as_critical() -> None:
+    """A CPU fallback is a safety regression, not a performance note: the same
+    pipeline runs ~16 FPS on the Orin GPU and ~0.65 FPS on the CPU."""
+    from kineticpulse.runtime_status import (
+        VISION_FPS_CRITICAL,
+        VISION_FPS_WARN,
+    )
+
+    status = CaregiverRuntimeStatus()
+    assert status.runtime_payload()["health"] == "unknown"
+
+    status.set_accelerator("cuda", "Orin")
+    status.set_vision_fps(16.4)
+    status.set_backends("tensorrt", "tensorrt")
+    ok = status.runtime_payload()
+    assert ok["health"] == "ok"
+    assert ok["accelerator"] == "cuda"
+    assert ok["accelerator_device"] == "Orin"
+    assert ok["vision_fps"] == 16.4
+    assert ok["detector_backend"] == "tensorrt"
+
+    status.set_vision_fps(VISION_FPS_WARN - 1)
+    assert status.runtime_payload()["health"] == "degraded"
+
+    status.set_vision_fps(VISION_FPS_CRITICAL - 1)
+    assert status.runtime_payload()["health"] == "critical"
+
+    # CPU is critical regardless of the rate it happens to be reporting.
+    status.set_accelerator("cpu")
+    status.set_vision_fps(60.0)
+    assert status.runtime_payload()["health"] == "critical"
+
+
+def test_monitoring_payload_carries_the_runtime_block() -> None:
+    status = CaregiverRuntimeStatus()
+    status.set_accelerator("cuda", "Orin")
+    status.set_vision_fps(16.4)
+    payload = build_monitoring_payload(
+        alerts=AlertsConfig(), snapshot=None, runtime=status.runtime_payload()
+    )
+    assert payload["runtime"]["health"] == "ok"
+    assert payload["runtime"]["vision_fps"] == 16.4
+
+
+def test_monitoring_payload_runtime_defaults_to_unknown() -> None:
+    """Never absent: the dashboard reads one field instead of inferring."""
+    payload = build_monitoring_payload(alerts=AlertsConfig(), snapshot=None)
+    assert payload["runtime"]["health"] == "unknown"
+    assert payload["runtime"]["accelerator"] == "unknown"
+    assert payload["runtime"]["vision_fps"] is None
+
+
+def test_backend_is_named_from_the_weights_suffix() -> None:
+    """The dashboard shows whether TensorRT engines are actually in use."""
+    from kineticpulse.main import _backend_of
+
+    assert _backend_of("runs/detect/x/weights/best.engine") == "tensorrt"
+    assert _backend_of("yolov8s-pose.pt") == "pytorch"
+    assert _backend_of("model.onnx") == "onnx"
+    assert _backend_of("weird") == "weird"
+
+
+def test_accelerator_check_records_into_runtime_status(monkeypatch) -> None:
+    import sys
+    import types
+
+    from kineticpulse import main as kp_main
+
+    status = CaregiverRuntimeStatus()
+    monkeypatch.setitem(
+        sys.modules, "torch",
+        types.SimpleNamespace(
+            __version__="2.9.1",
+            version=types.SimpleNamespace(cuda="12.6"),
+            cuda=types.SimpleNamespace(
+                is_available=lambda: True, get_device_name=lambda _i: "Orin"
+            ),
+        ),
+    )
+    kp_main._log_accelerator_status(no_camera=False, runtime_status=status)
+    assert status.accelerator == "cuda"
+    assert status.accelerator_device == "Orin"
+
+    monkeypatch.setitem(
+        sys.modules, "torch",
+        types.SimpleNamespace(
+            __version__="2.12.0+cu130", __file__="/x/torch/__init__.py",
+            version=types.SimpleNamespace(cuda="13.0"),
+            cuda=types.SimpleNamespace(is_available=lambda: False),
+        ),
+    )
+    kp_main._log_accelerator_status(no_camera=False, runtime_status=status)
+    assert status.accelerator == "cpu"
+    assert status.runtime_payload()["health"] == "critical"

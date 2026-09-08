@@ -1878,3 +1878,35 @@ select {
   .control-shell { padding: 18px 14px 48px; }
   .control-button-grid { grid-template-columns: 1fr; }
 }
+
+
+/* Edge-runtime degradation banner. Distinct from the amber drill/simulation
+   banners: this is the system telling on itself, not a labelling notice. */
+.runtime-banner {
+  margin-bottom: 18px;
+  padding: 13px 17px;
+  border: 1px solid rgba(37, 99, 235, 0.35);
+  border-left-width: 4px;
+  border-radius: 12px;
+  background: rgba(239, 246, 255, 0.92);
+  color: #1e3a8a;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.runtime-banner strong { color: #1d4ed8; }
+
+.runtime-banner.critical {
+  border-color: rgba(185, 28, 28, 0.45);
+  background: rgba(254, 242, 242, 0.94);
+  color: #7f1d1d;
+}
+
+.runtime-banner.critical strong { color: #991b1b; }
+
+.drill-banner code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: rgba(217, 119, 6, 0.14);
+  font-size: 12px;
+}

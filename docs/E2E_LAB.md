@@ -68,6 +68,61 @@ Trigger without falling on camera:
 
 (Use real TCP wristband instead of `--mock-ble` once step 2 is green.)
 
+## 3b. Live preview
+
+On the Jetson's own desktop:
+
+```bash
+python -m kineticpulse.main --config config.yaml --preview --preview-scale 0.75
+```
+
+- [ ] Log: `Preview window open: 'KineticPulse - motion detection'`
+- [ ] Window shows the bbox, skeleton, MOTION and FUSION panels
+- [ ] Header FPS matches what the pipeline is really achieving (see below)
+- [ ] `q` in the window stops the pipeline cleanly
+
+Over SSH a window cannot open, so write the overlay to a file:
+
+```bash
+python -m kineticpulse.main --config config.yaml \
+  --preview-snapshot /tmp/kp-live.png --preview-snapshot-every 15
+```
+
+- [ ] Log: `Preview snapshots -> /tmp/kp-live.png (every 15 frames)`
+- [ ] The file refreshes; `scp` or open it to check the overlay
+
+**Check the FPS in the header.** Inference is the bottleneck, not capture:
+capture reaches 28.7 FPS on MJPG while the two YOLO models do not. Measured
+on an Orin Nano Super at 1280x720:
+
+| Setup | CUDA | Vision FPS |
+|---|---|---|
+| system `/usr/bin/python` | unavailable (generic PyPI wheel) | 0.65 |
+| `.venv`, PyTorch weights | Orin, CUDA 12.6 | 14.3 |
+| `.venv`, TensorRT FP16 engines | same | 17.4 |
+| `.venv`, engines + `--preview` | same | 13.0 |
+
+- [ ] Started through `./deploy/jetson/run` or with `.venv` activated —
+      **not** the system interpreter
+- [ ] Startup log says `Accelerator: Orin (torch ..., CUDA 12.6)`, not
+      `CUDA IS UNAVAILABLE`
+- [ ] `.venv/bin/python -c "import torch; print(torch.cuda.is_available())"` → `True`
+- [ ] `nvpmodel -q` reports `MAXN_SUPER`
+- [ ] `tegrastats` shows `GR3D_FREQ` high (GPU-bound, as expected)
+- [ ] `Vision: N FPS over 10s ...` appears in the log every 10 s and N is
+      double-digit
+- [ ] Dashboard shows an "Edge rate" badge with that same number, and **no**
+      "Edge runtime" banner
+- [ ] `curl -s http://127.0.0.1:8790/monitoring | jq .runtime` → `health: "ok"`,
+      `accelerator: "cuda"`, `detector_backend: "tensorrt"`
+- [ ] With `--mock-ble`, the dashboard shows a "Synthetic sensors" banner even
+      before any drill is started
+- [ ] `detector.weights` / `pose.weights` point at `.engine` files (see the
+      README for the export commands; rebuild after a JetPack upgrade)
+- [ ] The same log line's "TSSTG sees the last 30 frames = ~N s" is noted —
+      the checkpoint was trained on ~1.0 s clips, so a much larger span is a
+      known accuracy gap, not a config error
+
 ## 5b. Scenario control panel (bench only)
 
 Skip on a real-hardware pass — the panel needs `--mock-ble` and is disabled by

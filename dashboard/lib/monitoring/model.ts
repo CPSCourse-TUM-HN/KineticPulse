@@ -19,6 +19,23 @@ export type MonitoringSeverity = "info" | "warning" | "critical";
  * BPM as a real vital. See kineticpulse/sensors/ppg_sim.py.
  */
 export type PpgSource = "hardware" | "simulated";
+export type RuntimeHealth = "ok" | "degraded" | "critical" | "unknown";
+export type Accelerator = "cuda" | "cpu" | "unknown";
+export type InferenceBackend = string;
+
+/**
+ * Edge runtime health. Surfaced to the caregiver because a CPU fallback is a
+ * safety regression, not just a slow one: the same pipeline runs ~16 FPS on
+ * the Jetson GPU and ~0.65 FPS on the CPU, and a fall lasts under a second.
+ */
+export interface RuntimeInfo {
+  health: RuntimeHealth;
+  accelerator: Accelerator;
+  acceleratorDevice: string | null;
+  visionFps: number | null;
+  detectorBackend: InferenceBackend | null;
+  poseBackend: InferenceBackend | null;
+}
 /**
  * Provenance of the telemetry behind a snapshot. `drill: true` means a
  * scripted scenario is driving the pipeline from the control panel, so the
@@ -85,6 +102,7 @@ export interface MonitoringModel {
   };
   /** Never omitted: a marker that appears only during drills gets ignored. */
   simulation: SimulationInfo;
+  runtime: RuntimeInfo;
   recentEvents: MonitoringEvent[];
 }
 
@@ -119,6 +137,14 @@ export interface MonitoringWirePayload {
     sensor_source: "hardware" | "mock";
     ppg_source: PpgSource;
     scenario: string | null;
+  };
+  runtime?: {
+    health: RuntimeHealth;
+    accelerator: Accelerator;
+    accelerator_device: string | null;
+    vision_fps: number | null;
+    detector_backend: string | null;
+    pose_backend: string | null;
   };
   events: Array<{
     id: string;

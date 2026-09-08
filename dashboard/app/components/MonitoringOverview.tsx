@@ -191,6 +191,14 @@ export default function MonitoringOverview({
             value={model.fall.detected ? "Detected" : "Clear"}
             tone={model.fall.detected ? "critical" : "normal"}
           />
+          {/* Always shown, healthy or not: an operator needs to know the rate
+              the detector is really running at, not only when it breaks. */}
+          <StatusBadge
+            label="Edge rate"
+            value={runtimeRateLabel(model.runtime)}
+            tone={runtimeTone(model.runtime)}
+            title={runtimeDetail(model.runtime)}
+          />
         </div>
       </section>
 
@@ -411,13 +419,44 @@ function StatusItem({
   );
 }
 
-function StatusBadge({ label, value, tone }: { label: string; value: string; tone: Tone }) {
+function StatusBadge({
+  label,
+  value,
+  tone,
+  title
+}: { label: string; value: string; tone: Tone; title?: string }) {
   return (
-    <div className={`status-badge ${tone}`}>
+    <div className={`status-badge ${tone}`} title={title}>
       <span>{label}</span>
       <strong>{value}</strong>
     </div>
   );
+}
+
+function runtimeRateLabel(runtime: MonitoringModel["runtime"]): string {
+  if (runtime.visionFps === null) {
+    return runtime.accelerator === "cpu" ? "CPU" : "—";
+  }
+  return `${runtime.visionFps} FPS`;
+}
+
+function runtimeTone(runtime: MonitoringModel["runtime"]): Tone {
+  if (runtime.health === "critical") return "critical";
+  if (runtime.health === "degraded") return "warning";
+  return "normal";
+}
+
+function runtimeDetail(runtime: MonitoringModel["runtime"]): string {
+  const parts = [
+    runtime.accelerator === "cuda"
+      ? `GPU${runtime.acceleratorDevice ? ` (${runtime.acceleratorDevice})` : ""}`
+      : runtime.accelerator === "cpu"
+        ? "CPU — no CUDA"
+        : "accelerator unknown"
+  ];
+  if (runtime.detectorBackend) parts.push(`detector: ${runtime.detectorBackend}`);
+  if (runtime.poseBackend) parts.push(`pose: ${runtime.poseBackend}`);
+  return parts.join(" · ");
 }
 
 function SectionHeader({ kicker, title, meta }: { kicker: string; title: string; meta: string }) {

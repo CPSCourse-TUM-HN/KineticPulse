@@ -28,6 +28,14 @@ export function normalMonitoringPayload(): MonitoringWirePayload {
       ppg_source: "hardware",
       scenario: null
     },
+    runtime: {
+      health: "ok",
+      accelerator: "cuda",
+      accelerator_device: "Orin",
+      vision_fps: 16.4,
+      detector_backend: "tensorrt",
+      pose_backend: "tensorrt"
+    },
     events: [
       { id: "runtime-2", timestamp_ms: now - 1_000, severity: "info", category: "vision", title: "Standing posture", detail: "Vision confidence 96%; no fall signature." },
       { id: "runtime-1", timestamp_ms: now - 2_000, severity: "info", category: "sensor", title: "Sensor sample received", detail: "Heart rate and motion are within normal bounds." }
@@ -88,6 +96,50 @@ export function drillMonitoringPayload(): MonitoringWirePayload {
     sensor_source: "mock",
     ppg_source: "hardware",
     scenario: "demo_trip_fall"
+  };
+  return payload;
+}
+
+/**
+ * `--mock-ble` at the resting baseline: telemetry is generated but no drill
+ * scenario is running, so `drill` is false. The dashboard still has to say
+ * these are not the person's vitals.
+ */
+export function syntheticSensorPayload(): MonitoringWirePayload {
+  const payload = normalMonitoringPayload();
+  payload.simulation = {
+    drill: false,
+    sensor_source: "mock",
+    ppg_source: "hardware",
+    scenario: "resting"
+  };
+  return payload;
+}
+
+/** The CPU fallback: same pipeline, ~0.65 FPS, steps over falls. */
+export function cpuFallbackPayload(): MonitoringWirePayload {
+  const payload = normalMonitoringPayload();
+  payload.runtime = {
+    health: "critical",
+    accelerator: "cpu",
+    accelerator_device: null,
+    vision_fps: 0.7,
+    detector_backend: "pytorch",
+    pose_backend: "pytorch"
+  };
+  return payload;
+}
+
+/** Running on the GPU but below the useful frame rate. */
+export function degradedRuntimePayload(): MonitoringWirePayload {
+  const payload = normalMonitoringPayload();
+  payload.runtime = {
+    health: "degraded",
+    accelerator: "cuda",
+    accelerator_device: "Orin",
+    vision_fps: 7.2,
+    detector_backend: "tensorrt",
+    pose_backend: "tensorrt"
   };
   return payload;
 }

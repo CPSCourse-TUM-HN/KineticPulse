@@ -3,6 +3,8 @@ import React from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mapControlPayload } from "../lib/control/model";
 import { controlPayload } from "./controlFixture";
+import { mapBackendMonitoringPayload } from "../lib/monitoring/backendMonitoringAdapter";
+import { normalMonitoringPayload as monitoringFixture } from "./monitoringFixture";
 
 const selectScenario = vi.fn();
 const fetchControlState = vi.fn();
@@ -127,5 +129,20 @@ describe("ScenarioControlPanel", () => {
     fetchControlState.mockRejectedValue(new Error("Control backend unavailable"));
     render(<ScenarioControlPanel />);
     expect(await screen.findByText("Control backend unavailable")).toBeInTheDocument();
+  });
+});
+
+describe("live fusion readout", () => {
+  it("humanises every fusion tier, including tier_0_dismiss", async () => {
+    // tier_0_dismiss is what a quiet baseline actually reports, so leaving it
+    // out of the label map put a raw enum on screen.
+    fetchMonitoringSnapshot.mockResolvedValue({
+      ...mapBackendMonitoringPayload(monitoringFixture()),
+      emergency: { level: "tier_0_dismiss", scenario: "D", reason: "quiet" }
+    });
+    render(<ScenarioControlPanel />);
+
+    expect(await screen.findByText("Tier 0 — dismissed")).toBeInTheDocument();
+    expect(screen.queryByText("tier_0_dismiss")).not.toBeInTheDocument();
   });
 });

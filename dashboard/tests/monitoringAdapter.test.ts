@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { mapBackendMonitoringPayload } from "../lib/monitoring/backendMonitoringAdapter";
-import { normalMonitoringPayload, simulatedHeartRatePayload } from "./monitoringFixture";
+import {
+  cpuFallbackPayload,
+  normalMonitoringPayload,
+  simulatedHeartRatePayload
+} from "./monitoringFixture";
 
 describe("Jetson monitoring adapter", () => {
   it("maps the real wire contract into the normalized UI model", () => {
@@ -73,5 +77,35 @@ describe("simulation provenance", () => {
       ppgSource: "hardware",
       scenario: null
     });
+  });
+});
+
+describe("edge runtime health", () => {
+  it("maps the runtime block", () => {
+    const model = mapBackendMonitoringPayload(normalMonitoringPayload());
+    expect(model.runtime).toEqual({
+      health: "ok",
+      accelerator: "cuda",
+      acceleratorDevice: "Orin",
+      visionFps: 16.4,
+      detectorBackend: "tensorrt",
+      poseBackend: "tensorrt"
+    });
+  });
+
+  it("reports the CPU fallback as critical", () => {
+    const model = mapBackendMonitoringPayload(cpuFallbackPayload());
+    expect(model.runtime.health).toBe("critical");
+    expect(model.runtime.accelerator).toBe("cpu");
+    expect(model.runtime.visionFps).toBe(0.7);
+  });
+
+  it("defaults to unknown when the backend predates the field", () => {
+    const legacy = normalMonitoringPayload();
+    delete legacy.runtime;
+    const model = mapBackendMonitoringPayload(legacy);
+    expect(model.runtime.health).toBe("unknown");
+    expect(model.runtime.accelerator).toBe("unknown");
+    expect(model.runtime.visionFps).toBeNull();
   });
 });
