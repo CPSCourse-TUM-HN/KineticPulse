@@ -21,7 +21,8 @@
           "NSAllowsArbitraryLoads": true,
           "NSAllowsLocalNetworking": true
         }
-      }
+      },
+      "bitcode": false
     },
     "android": {
       "package": "de.tum.kineticpulse.caregiver",
@@ -33,7 +34,15 @@
       "permissions": [
         "INTERNET",
         "ACCESS_NETWORK_STATE",
-        "MODIFY_AUDIO_SETTINGS"
+        "MODIFY_AUDIO_SETTINGS",
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.INTERNET",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.WAKE_LOCK",
+        "android.permission.BLUETOOTH"
       ]
     },
     "plugins": [
@@ -46,15 +55,25 @@
         }
       ],
       [
-        "react-native-webrtc",
+        "@config-plugins/react-native-webrtc",
         {
           "cameraPermission": "KineticPulse may use the camera for future two-way calls.",
           "microphonePermission": "KineticPulse may use the microphone for future two-way calls."
         }
-      ]
+      ],
+      "expo-asset"
     ],
     "experiments": {
       "typedRoutes": true
-    }
+    },
+    "extra": {
+      "router": {
+        "origin": false
+      },
+      "eas": {
+        "projectId": "f3d8365d-eb0b-4632-958c-8305d7c741d2"
+      }
+    },
+    "owner": "kingsman1960"
   }
 }
