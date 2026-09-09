@@ -1,4 +1,5 @@
-import { Pressable, StyleSheet, Text, type PressableProps, type TextStyle, type ViewStyle } from "react-native";
+import { forwardRef } from "react";
+import { Pressable, StyleSheet, Text, View, type PressableProps, type ViewStyle } from "react-native";
 
 import { colors, radius, spacing, typography } from "@/theme";
 
@@ -9,12 +10,16 @@ type Props = PressableProps & {
   variant?: Variant;
 };
 
-export function Button({ label, variant = "primary", disabled, style, ...rest }: Props) {
+export const Button = forwardRef<View, Props>(function Button(
+  { label, variant = "primary", disabled, style, ...rest },
+  ref
+) {
   const variantStyle = styles[variant];
   const pressedStyle = variant === "primary" ? styles.primaryPressed : styles.secondaryPressed;
 
   return (
     <Pressable
+      ref={ref}
       accessibilityRole="button"
       disabled={disabled}
       style={({ pressed }) => [
@@ -37,7 +42,7 @@ export function Button({ label, variant = "primary", disabled, style, ...rest }:
       </Text>
     </Pressable>
   );
-}
+});
 
 type TextLinkProps = PressableProps & {
   label: string;

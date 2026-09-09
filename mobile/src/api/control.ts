@@ -45,7 +45,9 @@ export async function fetchControl(settings: AppSettings): Promise<ControlState>
     generation: typeof json.generation === "number" ? json.generation : 0,
     sensorSource: json.sensor_source ?? "unknown",
     drill: json.drill === true,
-    scenarios: Array.isArray(json.scenarios) ? json.scenarios : []
+    scenarios: (Array.isArray(json.scenarios) ? json.scenarios : []).filter(
+      (s: ScenarioInfo) => typeof s?.id === "string" && typeof s?.label === "string"
+    )
   };
 }
 

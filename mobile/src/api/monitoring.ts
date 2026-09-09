@@ -52,21 +52,21 @@ export function monitoringUrl(settings: AppSettings): string {
 
 /**
  * Origin of the monitoring server, without the `/monitoring` path — the base
- * for the sibling `/control` and `/preview.mjpg` endpoints. The setup QR ships
+ * for the sibling `/control` and `/preview.jpg` endpoints. The setup QR ships
  * `monitoringHttpBase` as a full URL including the path, so strip it.
  */
 export function monitoringOrigin(settings: AppSettings): string {
   return monitoringUrl(settings).replace(/\/monitoring\/?$/, "");
 }
 
-/** Annotated detection feed as `multipart/x-mixed-replace` (an `<img>` renders it). */
+/** Latest annotated frame. RN Image can decode JPEG; it cannot decode MJPEG. */
 export function previewStreamUrl(settings: AppSettings): string {
-  return `${monitoringOrigin(settings)}/preview.mjpg`;
+  return `${monitoringOrigin(settings)}/preview.jpg`;
 }
 
-function hrStatusFrom(json: any, snap: any, hr: unknown): string {
-  if (json.sensor?.connection === "disconnected") return "unavailable";
-  if (snap.hr === "pulse_lost") return "pulse_lost";
+function hrStatusFrom(sensorConnection: unknown, hrSig: unknown, hr: unknown): string {
+  if (sensorConnection === "disconnected") return "unavailable";
+  if (hrSig === "pulse_lost") return "pulse_lost";
   if (typeof hr !== "number") return "unavailable";
   if (hr < 50) return "low";
   if (hr > 100) return "elevated";
@@ -85,11 +85,11 @@ export async function fetchLiveVitals(settings: AppSettings): Promise<LiveVitals
 
   return {
     bpm: typeof hr === "number" ? hr : null,
-    hrStatus: hrStatusFrom(json, snap, hr),
+    hrStatus: hrStatusFrom(json.sensor?.connection, snap.hr, hr),
     hrSignature: snap.hr ?? "unknown",
     sensorConnection: json.sensor?.connection ?? "unknown",
     ppgSource: json.sensor?.ppg_source ?? "unknown",
-    hrSimulated: snap.hr_simulated === true,
+    hrSimulated: snap.hr_simulated === true || json.sensor?.ppg_source === "simulated",
     emergencyTier: snap.decision?.tier ?? "none",
     scenario: snap.decision?.scenario ?? "",
     reason: snap.decision?.reason ?? "",

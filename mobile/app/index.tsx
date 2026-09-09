@@ -1,7 +1,8 @@
 import { Link, useFocusEffect } from "expo-router";
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   RefreshControl,
   ScrollView,
   StyleSheet,
@@ -13,7 +14,8 @@ import {
   activateScenario,
   ControlState,
   fetchControl,
-  resetScenario
+  resetScenario,
+  ScenarioInfo
 } from "@/api/control";
 import { fetchLiveVitals, LiveVitals, previewStreamUrl } from "@/api/monitoring";
 import { fetchSessions, formatTime } from "@/api/sessions";
@@ -68,17 +70,22 @@ export default function HomeScreen() {
   const [pending, setPending] = useState("");
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const settingsRef = useRef<AppSettings | null>(null);
 
   /**
    * The three backends are polled independently. The signaling server (:8787)
    * is optional for the demo — the Jetson's monitoring server (:8790) carries
    * vitals, the detection feed and scenario control on its own, so a signaling
    * outage must not blank the screen.
+   *
+   * Settings are loaded once per focus, not every poll — SecureStore on every
+   * 3s tick was jank, and a new settings object remounted the preview.
    */
   const refresh = useCallback(async (showSpinner = false) => {
     if (showSpinner) setRefreshing(true);
     try {
-      const cfg = await loadSettings();
+      const cfg = settingsRef.current ?? (await loadSettings());
+      settingsRef.current = cfg;
       setSettings(cfg);
 
       const [liveVitals, controlState, sessionList] = await Promise.allSettled([
@@ -98,7 +105,7 @@ export default function HomeScreen() {
         );
       }
 
-      setControl(controlState.status === "fulfilled" ? controlState.value : null);
+      if (controlState.status === "fulfilled") setControl(controlState.value);
 
       if (sessionList.status === "fulfilled") {
         setSessions(sessionList.value);
@@ -119,6 +126,7 @@ export default function HomeScreen() {
 
   useFocusEffect(
     useCallback(() => {
+      settingsRef.current = null;
       refresh();
       const timer = setInterval(() => refresh(), 3000);
       return () => clearInterval(timer);
@@ -143,6 +151,25 @@ export default function HomeScreen() {
       }
     },
     [settings, refresh]
+  );
+
+  const onScenarioPress = useCallback(
+    (s: ScenarioInfo) => {
+      const go = () => applyScenario(s.id);
+      if (s.expected_tier?.startsWith("tier_2")) {
+        Alert.alert(
+          "This can dispatch a real alert",
+          `${s.label} bypasses voice verification. Activate only against a test webhook.`,
+          [
+            { text: "Cancel", style: "cancel" },
+            { text: "Activate", style: "destructive", onPress: go }
+          ]
+        );
+        return;
+      }
+      go();
+    },
+    [applyScenario]
   );
 
   const tier = vitals?.emergencyTier ?? "none";
@@ -296,7 +323,7 @@ export default function HomeScreen() {
                 label={pending === s.id ? "…" : s.label}
                 active={control.scenario === s.id}
                 disabled={Boolean(pending) || !control.available}
-                onPress={() => applyScenario(s.id)}
+                onPress={() => onScenarioPress(s)}
                 style={styles.chip}
               />
             ))}

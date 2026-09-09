@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { appendVitalSample, bpmRange, polyline } from "../lib/monitoring/sparkline";
+import { appendVitalSample, bpmRange, polyline, type VitalSample } from "../lib/monitoring/sparkline";
 
 describe("vital sparkline", () => {
   it("dedupes the same timestamp and caps the window", () => {
     const once = appendVitalSample([], { t: 1, bpm: 72 });
     expect(appendVitalSample(once, { t: 1, bpm: 80 })).toEqual(once);
     const filled = Array.from({ length: 5 }, (_, i) => ({ t: i, bpm: 70 + i }));
-    const capped = filled.reduce((h, s) => appendVitalSample(h, s, 3), [] as typeof filled);
+    const capped = filled.reduce((h, s) => appendVitalSample(h, s, 3), [] as VitalSample[]);
     expect(capped.map((s) => s.t)).toEqual([2, 3, 4]);
   });
 
