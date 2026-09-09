@@ -55,6 +55,20 @@ export function monitoringUrl(settings: AppSettings): string {
   }
 }
 
+/**
+ * Origin of the monitoring server, without the `/monitoring` path — the base
+ * for the sibling `/control` and `/preview.mjpg` endpoints. The setup QR ships
+ * `monitoringHttpBase` as a full URL including the path, so strip it.
+ */
+export function monitoringOrigin(settings: AppSettings): string {
+  return monitoringUrl(settings).replace(/\/monitoring\/?$/, "");
+}
+
+/** Annotated detection feed as `multipart/x-mixed-replace` (an `<img>` renders it). */
+export function previewStreamUrl(settings: AppSettings): string {
+  return `${monitoringOrigin(settings)}/preview.mjpg`;
+}
+
 function hrStatusFrom(sensorConnection: unknown, hrSig: unknown, hr: unknown): string {
   if (sensorConnection === "disconnected") return "unavailable";
   if (hrSig === "pulse_lost") return "pulse_lost";
