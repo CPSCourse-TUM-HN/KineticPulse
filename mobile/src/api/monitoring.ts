@@ -24,6 +24,7 @@ export type LiveVitals = {
   reason: string;
   drill: boolean;
   fallDetected: boolean;
+  fallConfidence: number | null;
   pose: string;
   accel: string;
   accelG: number | null;
@@ -79,6 +80,7 @@ function fromDashboardModel(json: Record<string, any>): LiveVitals | null {
     reason: json.emergency.reason ?? "",
     drill: json.simulation?.drill === true,
     fallDetected: json.fall?.detected === true,
+    fallConfidence: typeof json.fall?.confidence === "number" ? json.fall.confidence : null,
     pose: json.vision?.state ?? "unknown",
     accel: json.motion?.state ?? "unknown",
     accelG: typeof json.motion?.magnitudeG === "number" ? json.motion.magnitudeG : null,
@@ -129,6 +131,12 @@ export async function fetchLiveVitals(settings: AppSettings): Promise<LiveVitals
       snap.pose === "fallen" ||
       snap.pose === "prone" ||
       String(snap.decision?.tier ?? "").startsWith("tier_2"),
+    fallConfidence:
+      typeof snap.detector_conf === "number"
+        ? snap.detector_conf
+        : typeof snap.action_conf === "number"
+          ? snap.action_conf
+          : null,
     pose: snap.pose ?? "unknown",
     accel: snap.accel ?? "unknown",
     accelG: typeof snap.latest_accel_g === "number" ? snap.latest_accel_g : null,

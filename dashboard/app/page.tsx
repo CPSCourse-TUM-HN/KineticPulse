@@ -13,29 +13,26 @@ export default function HomePage() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const controller = new AbortController();
-    let active = true;
+    let cancelled = false;
 
     async function refresh() {
       try {
-        const nextModel = await fetchMonitoringSnapshot(controller.signal);
-        if (!active) return;
+        const nextModel = await fetchMonitoringSnapshot();
+        if (cancelled) return;
         setModel(nextModel);
         setError(null);
       } catch (reason) {
-        if (!active || controller.signal.aborted) return;
+        if (cancelled) return;
         setError(reason instanceof Error ? reason.message : "Monitoring backend unavailable");
       } finally {
-        if (active) setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     }
 
-    setLoading(true);
     void refresh();
     const timer = window.setInterval(() => void refresh(), POLL_INTERVAL_MS);
     return () => {
-      active = false;
-      controller.abort();
+      cancelled = true;
       window.clearInterval(timer);
     };
   }, []);
