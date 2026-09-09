@@ -1,6 +1,8 @@
 import { AppSettings, IceServerConfig, SessionSummary } from "@/types/session";
 import { tierSemanticColor } from "@/theme";
 
+import { fetchTimed } from "./http";
+
 export function parseIceServers(text: string): IceServerConfig[] {
   const trimmed = text.trim();
   if (!trimmed) {
@@ -28,7 +30,7 @@ export async function fetchSessions(settings: AppSettings): Promise<SessionSumma
   if (settings.caregiverToken) {
     headers.Authorization = `Bearer ${settings.caregiverToken}`;
   }
-  const res = await fetch(`${settings.signalingHttpBase.replace(/\/$/, "")}/sessions`, {
+  const res = await fetchTimed(`${settings.signalingHttpBase.replace(/\/$/, "")}/sessions`, {
     headers
   });
   if (!res.ok) {

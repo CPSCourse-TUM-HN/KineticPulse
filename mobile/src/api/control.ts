@@ -1,5 +1,6 @@
 import { AppSettings } from "@/types/session";
 
+import { fetchTimed } from "./http";
 import { monitoringOrigin } from "./monitoring";
 
 export type ScenarioInfo = {
@@ -30,29 +31,37 @@ export type ControlState = {
 
 /** Bench control surface — `GET /control` (panel state + scenario catalogue). */
 export async function fetchControl(settings: AppSettings): Promise<ControlState> {
-  const res = await fetch(`${monitoringOrigin(settings)}/control`, {
+  const res = await fetchTimed(`${monitoringOrigin(settings)}/control`, {
     headers: { Accept: "application/json" }
   });
   if (!res.ok) throw new Error(`Control HTTP ${res.status}`);
   const json = await res.json();
+  const scenarios = Array.isArray(json.scenarios) ? json.scenarios : [];
   return {
     enabled: json.enabled === true,
     available: json.available === true,
     reason: json.reason ?? "",
     scenario: json.scenario ?? "resting",
-    scenarioLabel: json.scenario_label ?? json.scenario ?? "unknown",
-    elapsedS: typeof json.elapsed_s === "number" ? json.elapsed_s : 0,
+    scenarioLabel: json.scenarioLabel ?? json.scenario_label ?? json.scenario ?? "unknown",
+    elapsedS: typeof json.elapsedS === "number" ? json.elapsedS : typeof json.elapsed_s === "number" ? json.elapsed_s : 0,
     generation: typeof json.generation === "number" ? json.generation : 0,
-    sensorSource: json.sensor_source ?? "unknown",
+    sensorSource: json.sensorSource ?? json.sensor_source ?? "unknown",
     drill: json.drill === true,
-    scenarios: (Array.isArray(json.scenarios) ? json.scenarios : []).filter(
-      (s: ScenarioInfo) => typeof s?.id === "string" && typeof s?.label === "string"
-    )
+    scenarios: scenarios
+      .filter((s: { id?: unknown; label?: unknown }) => typeof s?.id === "string" && typeof s?.label === "string")
+      .map((s: Record<string, string>) => ({
+        id: s.id,
+        alias: s.alias ?? s.id,
+        label: s.label,
+        group: s.group ?? "",
+        expected_tier: s.expected_tier ?? s.expectedTier ?? "",
+        description: s.description ?? ""
+      }))
   };
 }
 
 async function post(settings: AppSettings, path: string, body?: unknown): Promise<void> {
-  const res = await fetch(`${monitoringOrigin(settings)}${path}`, {
+  const res = await fetchTimed(`${monitoringOrigin(settings)}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body)

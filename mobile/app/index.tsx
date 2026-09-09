@@ -71,22 +71,22 @@ export default function HomeScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const settingsRef = useRef<AppSettings | null>(null);
+  const busyRef = useRef(false);
 
   /**
-   * The three backends are polled independently. The signaling server (:8787)
-   * is optional for the demo — the Jetson's monitoring server (:8790) carries
-   * vitals, the detection feed and scenario control on its own, so a signaling
-   * outage must not blank the screen.
-   *
-   * Settings are loaded once per focus, not every poll — SecureStore on every
-   * 3s tick was jank, and a new settings object remounted the preview.
+   * Settings come from disk first so the chrome can paint. The Jetson fetches
+   * run after — they used to block the spinner until Android's ~2 min TCP
+   * timeout, which looked like a frozen app on a phone without Tailscale.
    */
   const refresh = useCallback(async (showSpinner = false) => {
+    if (busyRef.current) return;
+    busyRef.current = true;
     if (showSpinner) setRefreshing(true);
     try {
       const cfg = settingsRef.current ?? (await loadSettings());
       settingsRef.current = cfg;
       setSettings(cfg);
+      setLoading(false);
 
       const [liveVitals, controlState, sessionList] = await Promise.allSettled([
         fetchLiveVitals(cfg),
@@ -119,6 +119,7 @@ export default function HomeScreen() {
         );
       }
     } finally {
+      busyRef.current = false;
       setLoading(false);
       setRefreshing(false);
     }

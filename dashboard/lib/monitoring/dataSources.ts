@@ -1,4 +1,5 @@
 import { mapBackendMonitoringPayload } from "./backendMonitoringAdapter";
+import { DemoMonitoringDataSource } from "./demoDataSource";
 import type { MonitoringEventSource } from "./eventStore";
 import {
   type MonitoringModel,
@@ -33,6 +34,9 @@ export class BackendMonitoringDataSource implements MonitoringDataSource {
 }
 
 export function createMonitoringDataSource(): MonitoringDataSource {
+  if (process.env.KINETICPULSE_DEMO === "1") {
+    return new DemoMonitoringDataSource();
+  }
   const endpoint =
     process.env.KINETICPULSE_MONITORING_HTTP_URL ??
     "http://127.0.0.1:8790/monitoring";

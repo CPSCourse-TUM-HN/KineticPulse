@@ -1,3 +1,4 @@
+import { getDemoControlClient } from "./demoControlClient";
 import { mapControlPayload, type ControlModel, type ControlWirePayload } from "./model";
 
 /**
@@ -73,7 +74,9 @@ export class ControlRequestError extends Error {
 }
 
 export function createControlClient(): BackendControlClient {
-  // Derived from the monitoring URL so a single env var configures both.
+  if (process.env.KINETICPULSE_DEMO === "1") {
+    return getDemoControlClient();
+  }
   const monitoringUrl =
     process.env.KINETICPULSE_MONITORING_HTTP_URL ??
     "http://127.0.0.1:8790/monitoring";

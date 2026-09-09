@@ -1,18 +1,12 @@
 import { useLocalSearchParams } from "expo-router";
 import { useEffect, useState } from "react";
-import {
-  ActivityIndicator,
-  ScrollView,
-  StyleSheet,
-  Text,
-  View
-} from "react-native";
-import { RTCView } from "react-native-webrtc";
+import { ScrollView, StyleSheet, Text, View } from "react-native";
 
-import { useCaregiverPeer } from "@/hooks/useCaregiverPeer";
+import { LiveFeed } from "@/components/LiveFeed";
 import { FilterChip } from "@/components/FilterChip";
 import { HeroBand } from "@/components/HeroBand";
 import { SpecRow } from "@/components/SpecRow";
+import { useCaregiverPeer } from "@/hooks/useCaregiverPeer";
 import { loadSettings } from "@/storage/settings";
 import { colors, radius, spacing, tierSemanticColor, typography } from "@/theme";
 import { AppSettings } from "@/types/session";
@@ -62,25 +56,10 @@ export default function SessionScreen() {
       <View style={styles.videoSection}>
         <Text style={styles.sectionLabel}>Live video</Text>
         <View style={styles.videoShell}>
-          {remoteStream ? (
-            <RTCView
-              streamURL={remoteStream.toURL()}
-              style={styles.video}
-              objectFit="cover"
-              mirror={false}
-            />
-          ) : (
-            <View style={styles.videoPlaceholder}>
-              {connectionState === "connecting" ? (
-                <>
-                  <ActivityIndicator color={colors.primary} size="large" />
-                  <Text style={styles.placeholderText}>Connecting to Jetson feed…</Text>
-                </>
-              ) : (
-                <Text style={styles.placeholderText}>Waiting for remote video track</Text>
-              )}
-            </View>
-          )}
+          <LiveFeed
+            streamURL={remoteStream?.toURL()}
+            connecting={connectionState === "connecting"}
+          />
         </View>
       </View>
 

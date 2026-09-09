@@ -1,5 +1,7 @@
 import { AppSettings } from "@/types/session";
 
+import { fetchTimed } from "./http";
+
 export type MonitoringEvent = {
   id: string;
   timestamp_ms: number;
@@ -73,13 +75,51 @@ function hrStatusFrom(sensorConnection: unknown, hrSig: unknown, hr: unknown): s
   return "normal";
 }
 
-/** Poll Jetson GET /monitoring for continuous vitals (same contract as dashboard). */
+function fromDashboardModel(json: Record<string, any>): LiveVitals | null {
+  if (!json.heartRate || !json.emergency) return null;
+  const events = Array.isArray(json.recentEvents) ? json.recentEvents : [];
+  return {
+    bpm: typeof json.heartRate.bpm === "number" ? json.heartRate.bpm : null,
+    hrStatus: json.heartRate.status ?? "unavailable",
+    hrSignature: json.heartRate.simulated ? "simulated" : json.heartRate.status ?? "unknown",
+    sensorConnection: json.sensor?.connection ?? "unknown",
+    ppgSource:
+      json.simulation?.ppgSource ?? (json.heartRate.simulated ? "simulated" : "unknown"),
+    hrSimulated: json.heartRate.simulated === true,
+    emergencyTier: json.emergency.level ?? "none",
+    scenario: json.emergency.scenario ?? json.simulation?.scenario ?? "",
+    reason: json.emergency.reason ?? "",
+    pose: json.vision?.state ?? "unknown",
+    accel: json.motion?.state ?? "unknown",
+    accelG: typeof json.motion?.magnitudeG === "number" ? json.motion.magnitudeG : null,
+    detectorClass: json.vision?.state ?? null,
+    detectorConf: typeof json.vision?.confidence === "number" ? json.vision.confidence : null,
+    actionClass: json.vision?.actionClass ?? null,
+    actionConf: null,
+    subjectId: json.subjectId ?? "unknown",
+    location: json.location ?? "unknown",
+    events: events.map((e: Record<string, any>) => ({
+      id: String(e.id),
+      timestamp_ms: e.timestampMs ?? e.timestamp_ms ?? 0,
+      severity: e.severity ?? "",
+      category: e.category ?? "",
+      title: e.title ?? "",
+      detail: e.detail ?? ""
+    })),
+    updatedAtMs: json.updatedAtMs ?? Date.now()
+  };
+}
+
+/** Poll Jetson GET /monitoring or the laptop dashboard GET /api/monitoring. */
 export async function fetchLiveVitals(settings: AppSettings): Promise<LiveVitals> {
-  const response = await fetch(monitoringUrl(settings), {
+  const response = await fetchTimed(monitoringUrl(settings), {
     headers: { Accept: "application/json" }
   });
   if (!response.ok) throw new Error(`Monitoring HTTP ${response.status}`);
   const json = await response.json();
+  const dashboard = fromDashboardModel(json);
+  if (dashboard) return dashboard;
+
   const snap = json.snapshot ?? {};
   const hr = snap.latest_hr_bpm;
 
