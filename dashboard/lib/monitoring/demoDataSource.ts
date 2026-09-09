@@ -14,8 +14,8 @@ function wireForActiveScenario(): MonitoringWirePayload {
   const fallen = drill;
 
   return {
-    subject_id: "laptop-demo",
-    location: "Bench (no Jetson)",
+    subject_id: "Resident",
+    location: "Home",
     system: { connection: "connected" },
     sensor: { connection: "connected", ppg_source: "simulated" },
     snapshot: {
@@ -23,8 +23,8 @@ function wireForActiveScenario(): MonitoringWirePayload {
         tier: (cardiac ? "tier_2_cardiac" : drill ? (info?.expectedTier ?? "none") : "none") as EmergencyLevel,
         scenario: runtime.scenario,
         reason: drill
-          ? `Laptop demo replaying ${info?.label ?? runtime.scenario}.`
-          : "Demo baseline — Jetson is off."
+          ? `${info?.label ?? runtime.scenario} in progress.`
+          : "All monitoring signals are steady."
       },
       pose: fallen ? "prone" : "upright",
       accel: cardiac ? "soft_collapse" : drill ? "impact" : "quiet",
@@ -60,8 +60,8 @@ function wireForActiveScenario(): MonitoringWirePayload {
         timestamp_ms: runtime.startedAt,
         severity: drill ? "warning" : "info",
         category: "system",
-        title: drill ? `Demo scenario · ${info?.label}` : "Laptop demo online",
-        detail: "Synthetic telemetry. The Jetson is not connected."
+        title: drill ? info?.label ?? runtime.scenario : "Monitoring online",
+        detail: drill ? info?.description ?? "" : "Wristband and camera are reporting."
       }
     ]
   };

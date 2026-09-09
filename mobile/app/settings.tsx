@@ -24,7 +24,7 @@ export default function SettingsScreen() {
     setSaving(true);
     try {
       await saveSettings(form);
-      Alert.alert("Saved", "Server settings updated.");
+      Alert.alert("Saved", "Connection updated.");
       router.back();
     } catch (e) {
       Alert.alert("Error", e instanceof Error ? e.message : String(e));
@@ -36,12 +36,11 @@ export default function SettingsScreen() {
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       <Text style={styles.help}>
-        Scan the setup QR from the Jetson (`deploy/handoff/caregiver-qr.png` after `./bootstrap.sh`)
-        or enter values manually. Use the Jetson Tailscale IP when caregivers are off-LAN.
+        Scan the setup code from the device, or enter the connection details below.
       </Text>
 
       <Link href="/scan" asChild>
-        <Button label="Scan setup QR" style={styles.scanButton} />
+        <Button label="Scan setup code" style={styles.scanButton} />
       </Link>
 
       <View style={styles.form}>

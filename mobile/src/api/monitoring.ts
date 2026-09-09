@@ -22,6 +22,8 @@ export type LiveVitals = {
   emergencyTier: string;
   scenario: string;
   reason: string;
+  drill: boolean;
+  fallDetected: boolean;
   pose: string;
   accel: string;
   accelG: number | null;
@@ -52,20 +54,6 @@ export function monitoringUrl(settings: AppSettings): string {
   }
 }
 
-/**
- * Origin of the monitoring server, without the `/monitoring` path — the base
- * for the sibling `/control` and `/preview.jpg` endpoints. The setup QR ships
- * `monitoringHttpBase` as a full URL including the path, so strip it.
- */
-export function monitoringOrigin(settings: AppSettings): string {
-  return monitoringUrl(settings).replace(/\/monitoring\/?$/, "");
-}
-
-/** Latest annotated frame. RN Image can decode JPEG; it cannot decode MJPEG. */
-export function previewStreamUrl(settings: AppSettings): string {
-  return `${monitoringOrigin(settings)}/preview.jpg`;
-}
-
 function hrStatusFrom(sensorConnection: unknown, hrSig: unknown, hr: unknown): string {
   if (sensorConnection === "disconnected") return "unavailable";
   if (hrSig === "pulse_lost") return "pulse_lost";
@@ -89,6 +77,8 @@ function fromDashboardModel(json: Record<string, any>): LiveVitals | null {
     emergencyTier: json.emergency.level ?? "none",
     scenario: json.emergency.scenario ?? json.simulation?.scenario ?? "",
     reason: json.emergency.reason ?? "",
+    drill: json.simulation?.drill === true,
+    fallDetected: json.fall?.detected === true,
     pose: json.vision?.state ?? "unknown",
     accel: json.motion?.state ?? "unknown",
     accelG: typeof json.motion?.magnitudeG === "number" ? json.motion.magnitudeG : null,
@@ -133,6 +123,12 @@ export async function fetchLiveVitals(settings: AppSettings): Promise<LiveVitals
     emergencyTier: snap.decision?.tier ?? "none",
     scenario: snap.decision?.scenario ?? "",
     reason: snap.decision?.reason ?? "",
+    drill: json.simulation?.drill === true,
+    fallDetected:
+      snap.pose === "falling" ||
+      snap.pose === "fallen" ||
+      snap.pose === "prone" ||
+      String(snap.decision?.tier ?? "").startsWith("tier_2"),
     pose: snap.pose ?? "unknown",
     accel: snap.accel ?? "unknown",
     accelG: typeof snap.latest_accel_g === "number" ? snap.latest_accel_g : null,

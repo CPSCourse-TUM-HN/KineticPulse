@@ -1,8 +1,8 @@
-import { Link, useFocusEffect } from "expo-router";
+import { Link, Stack, useFocusEffect } from "expo-router";
 import { useCallback, useRef, useState } from "react";
 import {
   ActivityIndicator,
-  Alert,
+  Pressable,
   RefreshControl,
   ScrollView,
   StyleSheet,
@@ -10,34 +10,46 @@ import {
   View
 } from "react-native";
 
-import {
-  activateScenario,
-  ControlState,
-  fetchControl,
-  resetScenario,
-  ScenarioInfo
-} from "@/api/control";
-import { fetchLiveVitals, LiveVitals, previewStreamUrl } from "@/api/monitoring";
+import { fetchLiveVitals, LiveVitals } from "@/api/monitoring";
 import { fetchSessions, formatTime } from "@/api/sessions";
-import { Button } from "@/components/Button";
 import { FilterChip } from "@/components/FilterChip";
 import { HeroBand } from "@/components/HeroBand";
 import { InventoryCard } from "@/components/InventoryCard";
-import { PreviewStream } from "@/components/PreviewStream";
 import { SpecRow } from "@/components/SpecRow";
 import { loadSettings } from "@/storage/settings";
 import { colors, radius, spacing, tierSemanticColor, typography } from "@/theme";
 import { AppSettings, SessionSummary } from "@/types/session";
 
+function words(value: string): string {
+  return value.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function emergencyLabel(level: string): string {
+  const labels: Record<string, string> = {
+    none: "Clear",
+    tier_0_dismiss: "Dismissed",
+    tier_1_verify: "Needs verification",
+    tier_2_seizure: "Seizure — respond",
+    tier_2_cardiac: "Cardiac — respond"
+  };
+  return labels[level] ?? words(level);
+}
+
+function headline(vitals: LiveVitals): string {
+  const tier = vitals.emergencyTier;
+  if (tier.startsWith("tier_2") || vitals.fallDetected) return "Emergency response active";
+  if (vitals.sensorConnection === "disconnected") return "Monitoring has limited coverage";
+  if (tier === "tier_1_verify") return "Verification is in progress";
+  return "All monitoring signals are steady";
+}
+
 function SessionCard({ session }: { session: SessionSummary }) {
   const meta = session.meta ?? {};
-  const tier = meta.tier ?? "n/a";
-  const scenario = meta.scenario ?? "n/a";
+  const tier = meta.tier ?? "";
   const isCritical = tier.includes("tier_2") || tier.includes("2");
+  const title = meta.reason?.trim() || (tier ? emergencyLabel(tier) : "Active alert");
   const hrLine =
-    meta.heart_rate_bpm != null
-      ? `HR · ${meta.heart_rate_bpm} BPM${meta.hr_signature ? ` (${meta.hr_signature})` : ""}`
-      : null;
+    meta.heart_rate_bpm != null ? `Heart rate · ${meta.heart_rate_bpm} BPM` : null;
 
   return (
     <Link
@@ -45,39 +57,32 @@ function SessionCard({ session }: { session: SessionSummary }) {
       asChild
     >
       <InventoryCard
-        title={session.session_id}
+        title={title}
         lines={[
-          `Status · ${session.status}`,
-          `Scenario · ${scenario}`,
-          ...(hrLine ? [hrLine] : []),
-          `${meta.subject_id ?? "unknown"} · ${meta.location ?? "unknown"}`,
+          meta.subject_id && meta.location
+            ? `${meta.subject_id} · ${meta.location}`
+            : meta.location ?? meta.subject_id,
+          hrLine,
           `Started ${formatTime(session.created_at_ms)}`
-        ]}
-        ctaLabel="Open live feed"
-        headerRight={<FilterChip active={isCritical} label={tier} pointerEvents="none" />}
+        ].filter((line): line is string => Boolean(line))}
+        ctaLabel="Open alert"
+        headerRight={
+          tier ? <FilterChip active={isCritical} label={emergencyLabel(tier)} pointerEvents="none" /> : null
+        }
       />
     </Link>
   );
 }
 
 export default function HomeScreen() {
-  const [settings, setSettings] = useState<AppSettings | null>(null);
   const [vitals, setVitals] = useState<LiveVitals | null>(null);
-  const [vitalsError, setVitalsError] = useState("");
-  const [control, setControl] = useState<ControlState | null>(null);
+  const [offline, setOffline] = useState(false);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
-  const [signalingError, setSignalingError] = useState("");
-  const [pending, setPending] = useState("");
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const settingsRef = useRef<AppSettings | null>(null);
   const busyRef = useRef(false);
 
-  /**
-   * Settings come from disk first so the chrome can paint. The Jetson fetches
-   * run after — they used to block the spinner until Android's ~2 min TCP
-   * timeout, which looked like a frozen app on a phone without Tailscale.
-   */
   const refresh = useCallback(async (showSpinner = false) => {
     if (busyRef.current) return;
     busyRef.current = true;
@@ -85,39 +90,21 @@ export default function HomeScreen() {
     try {
       const cfg = settingsRef.current ?? (await loadSettings());
       settingsRef.current = cfg;
-      setSettings(cfg);
       setLoading(false);
 
-      const [liveVitals, controlState, sessionList] = await Promise.allSettled([
+      const [liveVitals, sessionList] = await Promise.allSettled([
         fetchLiveVitals(cfg),
-        fetchControl(cfg),
         fetchSessions(cfg)
       ]);
 
       if (liveVitals.status === "fulfilled") {
         setVitals(liveVitals.value);
-        setVitalsError("");
+        setOffline(false);
       } else {
-        setVitalsError(
-          liveVitals.reason instanceof Error
-            ? liveVitals.reason.message
-            : String(liveVitals.reason)
-        );
+        setOffline(true);
       }
 
-      if (controlState.status === "fulfilled") setControl(controlState.value);
-
-      if (sessionList.status === "fulfilled") {
-        setSessions(sessionList.value);
-        setSignalingError("");
-      } else {
-        setSessions([]);
-        setSignalingError(
-          sessionList.reason instanceof Error
-            ? sessionList.reason.message
-            : String(sessionList.reason)
-        );
-      }
+      if (sessionList.status === "fulfilled") setSessions(sessionList.value);
     } finally {
       busyRef.current = false;
       setLoading(false);
@@ -134,57 +121,7 @@ export default function HomeScreen() {
     }, [refresh])
   );
 
-  const applyScenario = useCallback(
-    async (id: string) => {
-      if (!settings) return;
-      setPending(id);
-      try {
-        if (id === "resting") {
-          await resetScenario(settings);
-        } else {
-          await activateScenario(settings, id);
-        }
-        await refresh();
-      } catch (e) {
-        setVitalsError(e instanceof Error ? e.message : String(e));
-      } finally {
-        setPending("");
-      }
-    },
-    [settings, refresh]
-  );
-
-  const onScenarioPress = useCallback(
-    (s: ScenarioInfo) => {
-      const go = () => applyScenario(s.id);
-      if (s.expected_tier?.startsWith("tier_2")) {
-        Alert.alert(
-          "This can dispatch a real alert",
-          `${s.label} bypasses voice verification. Activate only against a test webhook.`,
-          [
-            { text: "Cancel", style: "cancel" },
-            { text: "Activate", style: "destructive", onPress: go }
-          ]
-        );
-        return;
-      }
-      go();
-    },
-    [applyScenario]
-  );
-
   const tier = vitals?.emergencyTier ?? "none";
-  const critical = tier !== "none" && !tier.includes("tier_0");
-  const vitalsLine = vitals
-    ? [
-        vitals.bpm != null ? `${vitals.bpm} BPM` : "HR n/a",
-        vitals.hrSignature,
-        `ESP32 ${vitals.sensorConnection}`,
-        vitals.ppgSource === "unknown" ? null : `PPG ${vitals.ppgSource}`
-      ]
-        .filter(Boolean)
-        .join(" · ")
-    : null;
 
   if (loading) {
     return (
@@ -206,144 +143,86 @@ export default function HomeScreen() {
         />
       }
     >
+      <Stack.Screen
+        options={{
+          title: "KineticPulse",
+          headerRight: () => (
+            <Link href="/settings" asChild>
+              <Pressable hitSlop={12} accessibilityRole="button" accessibilityLabel="Setup">
+                <Text style={styles.headerLink}>Setup</Text>
+              </Pressable>
+            </Link>
+          )
+        }}
+      />
+
       <HeroBand
-        title="KineticPulse"
+        title={vitals ? headline(vitals) : "Connecting…"}
         subtitle={
-          vitals
-            ? `${vitals.subjectId} · ${vitals.location}`
-            : "Waiting for the Jetson edge node."
+          vitals ? `${vitals.subjectId} · ${vitals.location}` : "Waiting for monitoring."
         }
       >
-        {vitalsLine ? <Text style={styles.vitalsLine}>{vitalsLine}</Text> : null}
         <View style={styles.badgeRow}>
           <View style={[styles.tierBadge, { borderColor: tierSemanticColor(tier) }]}>
             <Text style={[styles.tierBadgeText, { color: tierSemanticColor(tier) }]}>
-              {tier.toUpperCase()}
+              {emergencyLabel(tier)}
             </Text>
           </View>
-          {control?.drill ? (
+          {vitals?.drill ? (
             <View style={[styles.tierBadge, styles.drillBadge]}>
               <Text style={[styles.tierBadgeText, styles.drillBadgeText]}>DRILL</Text>
             </View>
           ) : null}
         </View>
-        {critical && vitals?.reason ? (
-          <Text style={styles.reasonLine}>{vitals.reason}</Text>
-        ) : null}
+        {vitals?.reason ? <Text style={styles.reasonLine}>{vitals.reason}</Text> : null}
       </HeroBand>
 
-      <View style={styles.toolbar}>
-        <Link href="/settings" asChild>
-          <Button label="Server settings" variant="secondary" style={styles.toolbarButton} />
-        </Link>
-        <Link href="/scan" asChild>
-          <Button label="Scan setup QR" variant="secondary" style={styles.toolbarButton} />
-        </Link>
-        {settings ? (
-          <Text style={styles.serverHint} numberOfLines={1}>
-            {settings.monitoringHttpBase || settings.signalingHttpBase}
-          </Text>
-        ) : null}
-      </View>
+      {vitals?.drill ? (
+        <Text style={styles.drillNote}>
+          Practice drill. These readings are not from a real event.
+        </Text>
+      ) : null}
 
-      {vitalsError ? <Text style={styles.error}>Monitoring · {vitalsError}</Text> : null}
-
-      {settings ? (
-        <View style={styles.section}>
-          <Text style={styles.sectionLabel}>Live detection feed</Text>
-          <PreviewStream
-            url={previewStreamUrl(settings)}
-            reloadKey={control?.generation ?? 0}
-          />
-          <Text style={styles.caption}>
-            Annotated MJPEG overlay straight from the Jetson — no WebRTC session required.
-          </Text>
-        </View>
+      {offline && !vitals ? (
+        <Text style={styles.error}>Can&apos;t reach monitoring. Pull down to retry.</Text>
       ) : null}
 
       <View style={styles.section}>
-        <Text style={styles.sectionLabel}>Fusion snapshot</Text>
+        <Text style={styles.sectionLabel}>Now</Text>
         <View style={styles.panel}>
           <SpecRow
             label="Heart rate"
-            value={vitals?.bpm == null ? undefined : `${vitals.bpm} BPM (${vitals.hrStatus})`}
-          />
-          <SpecRow label="HR signature" value={vitals?.hrSignature} />
-          <SpecRow
-            label="PPG source"
             value={
-              vitals ? `${vitals.ppgSource}${vitals.hrSimulated ? " · simulated" : ""}` : undefined
-            }
-          />
-          <SpecRow label="Pose" value={vitals?.pose} />
-          <SpecRow
-            label="Accel"
-            value={
-              vitals?.accelG == null
-                ? vitals?.accel
-                : `${vitals.accelG.toFixed(2)} g (${vitals.accel})`
+              vitals?.bpm == null
+                ? vitals?.hrStatus === "pulse_lost"
+                  ? "Pulse lost"
+                  : "No signal"
+                : `${vitals.bpm} BPM`
             }
           />
           <SpecRow
-            label="Detector"
-            value={
-              vitals?.detectorClass
-                ? `${vitals.detectorClass}${
-                    vitals.detectorConf != null ? ` · ${vitals.detectorConf.toFixed(2)}` : ""
-                  }`
-                : undefined
-            }
+            label="Fall"
+            value={vitals?.fallDetected ? "Detected" : "Clear"}
           />
+          <SpecRow label="Posture" value={vitals ? words(vitals.pose) : undefined} />
           <SpecRow
-            label="Action"
-            value={
-              vitals?.actionClass
-                ? `${vitals.actionClass}${
-                    vitals.actionConf != null ? ` · ${vitals.actionConf.toFixed(2)}` : ""
-                  }`
-                : undefined
-            }
+            label="Activity"
+            value={vitals?.scenario ? words(vitals.scenario) : undefined}
+            last
           />
-          <SpecRow label="Scenario" value={vitals?.scenario} />
-          <SpecRow label="Updated" value={formatTime(vitals?.updatedAtMs ?? 0)} last />
         </View>
       </View>
-
-      {control?.enabled ? (
-        <View style={styles.section}>
-          <Text style={styles.sectionLabel}>Scenario control</Text>
-          <Text style={styles.caption}>
-            Replays scripted telemetry on the Jetson from t=0. Active · {control.scenarioLabel} (
-            {control.sensorSource})
-            {control.available ? "" : ` — unavailable: ${control.reason}`}
-          </Text>
-          <View style={styles.chipWrap}>
-            {control.scenarios.map((s) => (
-              <FilterChip
-                key={s.id}
-                label={pending === s.id ? "…" : s.label}
-                active={control.scenario === s.id}
-                disabled={Boolean(pending) || !control.available}
-                onPress={() => onScenarioPress(s)}
-                style={styles.chip}
-              />
-            ))}
-          </View>
-        </View>
-      ) : null}
 
       {vitals && vitals.events.length > 0 ? (
         <View style={styles.section}>
           <Text style={styles.sectionLabel}>Recent events</Text>
           <View style={styles.panel}>
-            {vitals.events.slice(0, 6).map((e, i, arr) => (
-              <View
-                key={e.id}
-                style={[styles.event, i < arr.length - 1 && styles.eventBorder]}
-              >
+            {vitals.events.slice(0, 8).map((e, i, arr) => (
+              <View key={e.id} style={[styles.event, i < arr.length - 1 && styles.eventBorder]}>
                 <Text style={styles.eventTitle}>{e.title}</Text>
                 <Text style={styles.eventMeta}>
-                  {e.severity} · {e.category} · {formatTime(e.timestamp_ms)}
+                  {formatTime(e.timestamp_ms)}
+                  {e.detail ? ` · ${e.detail}` : ""}
                 </Text>
               </View>
             ))}
@@ -351,24 +230,14 @@ export default function HomeScreen() {
         </View>
       ) : null}
 
-      {sessions.length > 0 || signalingError ? (
+      {sessions.length > 0 ? (
         <View style={styles.section}>
-          <Text style={styles.sectionLabel}>Active sessions</Text>
+          <Text style={styles.sectionLabel}>Active alerts</Text>
           {sessions.map((s) => (
             <SessionCard key={s.session_id} session={s} />
           ))}
-          {sessions.length === 0 ? (
-            <Text style={styles.caption}>
-              Signaling server unreachable ({signalingError}). WebRTC triage is offline; the
-              detection feed above is unaffected.
-            </Text>
-          ) : null}
         </View>
       ) : null}
-
-      <View style={styles.footer}>
-        <Text style={styles.footerText}>KineticPulse · Edge-AI fall detection</Text>
-      </View>
     </ScrollView>
   );
 }
@@ -385,29 +254,14 @@ const styles = StyleSheet.create({
   scrollContent: {
     paddingBottom: spacing.xl
   },
-  toolbar: {
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
-    gap: spacing.sm,
-    backgroundColor: colors.surfaceSoft,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.hairline
-  },
-  toolbarButton: {
-    alignSelf: "flex-start",
-    paddingHorizontal: spacing.lg
-  },
-  serverHint: {
-    ...typography.caption,
-    color: colors.muted
-  },
-  vitalsLine: {
-    ...typography.caption,
-    color: colors.onDarkSoft,
-    marginTop: spacing.md
+  headerLink: {
+    ...typography.labelUppercase,
+    color: colors.primary,
+    paddingRight: spacing.xs
   },
   badgeRow: {
     flexDirection: "row",
+    flexWrap: "wrap",
     gap: spacing.xs,
     marginTop: spacing.sm
   },
@@ -432,6 +286,13 @@ const styles = StyleSheet.create({
     color: colors.onDark,
     marginTop: spacing.sm
   },
+  drillNote: {
+    ...typography.bodySm,
+    color: colors.body,
+    backgroundColor: colors.surfaceSoft,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md
+  },
   error: {
     ...typography.bodySm,
     color: colors.error,
@@ -447,23 +308,11 @@ const styles = StyleSheet.create({
     ...typography.labelUppercase,
     color: colors.muted
   },
-  caption: {
-    ...typography.caption,
-    color: colors.muted
-  },
   panel: {
     backgroundColor: colors.surfaceCard,
     borderWidth: 1,
     borderColor: colors.hairline,
     paddingHorizontal: spacing.md
-  },
-  chipWrap: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: spacing.xs
-  },
-  chip: {
-    marginBottom: spacing.xxs
   },
   event: {
     paddingVertical: spacing.md
@@ -480,17 +329,5 @@ const styles = StyleSheet.create({
     ...typography.caption,
     color: colors.muted,
     marginTop: spacing.xxs
-  },
-  footer: {
-    marginTop: spacing.lg,
-    backgroundColor: colors.surfaceSoft,
-    paddingVertical: spacing.lg,
-    paddingHorizontal: spacing.lg,
-    borderTopWidth: 1,
-    borderTopColor: colors.hairline
-  },
-  footerText: {
-    ...typography.bodySm,
-    color: colors.muted
   }
 });

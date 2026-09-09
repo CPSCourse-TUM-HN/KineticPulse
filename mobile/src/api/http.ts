@@ -12,7 +12,7 @@ export async function fetchTimed(
     return await fetch(url, { ...init, signal: ctrl.signal });
   } catch (e) {
     if (e instanceof Error && e.name === "AbortError") {
-      throw new Error(`Timed out after ${ms / 1000}s — is the laptop dashboard running on Wi-Fi?`);
+      throw new Error("Couldn't reach the monitor.");
     }
     throw e;
   } finally {

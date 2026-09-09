@@ -58,13 +58,13 @@ export default function RootLayout() {
         }}
       >
         <Stack.Screen name="index" options={{ title: "KineticPulse" }} />
-        <Stack.Screen name="settings" options={{ title: "Server settings" }} />
-        <Stack.Screen name="scan" options={{ title: "Scan setup QR" }} />
+        <Stack.Screen name="settings" options={{ title: "Setup" }} />
+        <Stack.Screen name="scan" options={{ title: "Scan code" }} />
         <Stack.Screen
           name="session/[id]"
           options={{
-            title: "Live session",
-            headerBackTitle: "Sessions"
+            title: "Alert",
+            headerBackTitle: "Back"
           }}
         />
       </Stack>

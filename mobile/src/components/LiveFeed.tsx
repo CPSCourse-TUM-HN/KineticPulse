@@ -35,9 +35,9 @@ export function LiveFeed({ streamURL, connecting }: Props) {
       <Text style={styles.text}>
         {hasWebRTC
           ? connecting
-            ? "Connecting to Jetson feed…"
-            : "Waiting for remote video track"
-          : "Video is off in Expo Go. Vitals and scenario control still work."}
+            ? "Connecting to the camera…"
+            : "Waiting for the camera"
+            : "Live video is not available in this build."}
       </Text>
     </View>
   );

@@ -8,7 +8,7 @@ import { HeroBand } from "@/components/HeroBand";
 import { SpecRow } from "@/components/SpecRow";
 import { useCaregiverPeer } from "@/hooks/useCaregiverPeer";
 import { loadSettings } from "@/storage/settings";
-import { colors, radius, spacing, tierSemanticColor, typography } from "@/theme";
+import { colors, radius, spacing, typography } from "@/theme";
 import { AppSettings } from "@/types/session";
 
 export default function SessionScreen() {
@@ -35,18 +35,18 @@ export default function SessionScreen() {
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       <HeroBand
-        title={sessionId}
+        title={sessionMeta?.reason?.trim() || "Alert"}
         subtitle={
-          connected
-            ? "Live feed connected — triage the scene below."
-            : "Establishing secure WebRTC connection to Jetson edge node."
+          [sessionMeta?.subject_id, sessionMeta?.location].filter(Boolean).join(" · ") || undefined
         }
       >
         <View style={styles.statusRow}>
           <View style={[styles.statusDot, { backgroundColor: statusColor }]} />
-          <Text style={styles.statusText}>Connection · {connectionState}</Text>
+          <Text style={styles.statusText}>
+            {connected ? "Live camera connected" : failed ? "Camera unavailable" : "Connecting…"}
+          </Text>
           {tier ? (
-            <FilterChip active={isCritical} label={tier} pointerEvents="none" style={styles.tierChip} />
+            <FilterChip active={isCritical} label={tier.replace(/_/g, " ")} pointerEvents="none" style={styles.tierChip} />
           ) : null}
         </View>
       </HeroBand>
@@ -54,7 +54,7 @@ export default function SessionScreen() {
       {error ? <Text style={styles.error}>{error}</Text> : null}
 
       <View style={styles.videoSection}>
-        <Text style={styles.sectionLabel}>Live video</Text>
+        <Text style={styles.sectionLabel}>Scene</Text>
         <View style={styles.videoShell}>
           <LiveFeed
             streamURL={remoteStream?.toURL()}
@@ -64,13 +64,10 @@ export default function SessionScreen() {
       </View>
 
       <View style={styles.specPanel}>
-        <Text style={styles.sectionLabel}>Alert context</Text>
-        <SpecRow label="Session" value={sessionId} />
-        <SpecRow label="Tier" value={sessionMeta?.tier} />
-        <SpecRow label="Scenario" value={sessionMeta?.scenario} />
-        <SpecRow label="Subject" value={sessionMeta?.subject_id} />
+        <Text style={styles.sectionLabel}>Alert</Text>
+        <SpecRow label="Person" value={sessionMeta?.subject_id} />
         <SpecRow label="Location" value={sessionMeta?.location} />
-        <SpecRow label="Reason" value={sessionMeta?.reason} />
+        <SpecRow label="What happened" value={sessionMeta?.reason} />
         <SpecRow
           label="Heart rate"
           value={
@@ -78,33 +75,9 @@ export default function SessionScreen() {
               ? undefined
               : `${sessionMeta.heart_rate_bpm} BPM`
           }
-        />
-        <SpecRow label="HR signature" value={sessionMeta?.hr_signature ?? undefined} />
-        <SpecRow
-          label="Accel"
-          value={
-            sessionMeta?.accel_magnitude_g == null
-              ? undefined
-              : `${sessionMeta.accel_magnitude_g.toFixed(2)} g`
-          }
-        />
-        <SpecRow label="Accel signature" value={sessionMeta?.accel_signature ?? undefined} />
-        <SpecRow label="Voice" value={sessionMeta?.extra?.voice_verdict} />
-        <SpecRow label="Detector" value={sessionMeta?.detector_class} />
-        <SpecRow label="Action" value={sessionMeta?.action_class} />
-        <SpecRow
-          label="Action confidence"
-          value={sessionMeta?.action_confidence?.toFixed?.(2)}
           last
         />
       </View>
-
-      {tier ? (
-        <View style={[styles.ctaBand, { borderLeftColor: tierSemanticColor(tier) }]}>
-          <Text style={styles.ctaTitle}>{tier}</Text>
-          <Text style={styles.ctaBody}>{sessionMeta?.scenario}</Text>
-        </View>
-      ) : null}
     </ScrollView>
   );
 }
@@ -160,22 +133,6 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surfaceCard,
     aspectRatio: 16 / 9
   },
-  video: {
-    width: "100%",
-    height: "100%"
-  },
-  videoPlaceholder: {
-    flex: 1,
-    minHeight: 220,
-    alignItems: "center",
-    justifyContent: "center",
-    gap: spacing.md,
-    backgroundColor: colors.surfaceCard
-  },
-  placeholderText: {
-    ...typography.bodySm,
-    color: colors.muted
-  },
   specPanel: {
     marginHorizontal: spacing.lg,
     marginTop: spacing.lg,
@@ -183,21 +140,5 @@ const styles = StyleSheet.create({
     backgroundColor: colors.canvas,
     borderWidth: 1,
     borderColor: colors.hairline
-  },
-  ctaBand: {
-    marginHorizontal: spacing.lg,
-    marginTop: spacing.lg,
-    padding: spacing.lg,
-    backgroundColor: colors.surfaceDark,
-    borderLeftWidth: 4
-  },
-  ctaTitle: {
-    ...typography.titleMd,
-    color: colors.onDark
-  },
-  ctaBody: {
-    ...typography.bodyMd,
-    color: colors.onDarkSoft,
-    marginTop: spacing.xs
   }
 });

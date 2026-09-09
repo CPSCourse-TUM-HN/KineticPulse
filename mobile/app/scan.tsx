@@ -47,7 +47,7 @@ export default function ScanSettingsScreen() {
       <View style={styles.center}>
         <Text style={styles.title}>Camera access</Text>
         <Text style={styles.body}>
-          Allow camera access to scan the setup QR from the Jetson deploy handoff.
+          Allow camera access to scan the setup code.
         </Text>
         <Button label="Allow camera" onPress={requestPermission} style={styles.button} />
       </View>
@@ -57,7 +57,7 @@ export default function ScanSettingsScreen() {
   return (
     <View style={styles.container}>
       <Text style={styles.help}>
-        Scan the QR on the Jetson (`deploy/handoff/caregiver-qr.png`) or shown after `./bootstrap.sh`.
+        Scan the setup code shown on the device.
       </Text>
       <View style={styles.cameraWrap}>
         <CameraView
