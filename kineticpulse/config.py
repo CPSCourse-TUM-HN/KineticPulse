@@ -21,6 +21,13 @@ class CameraConfig:
     width: int = 1280
     height: int = 720
     fps: int = 30
+    # UVC webcams expose 720p+ at full frame rate only on MJPG; the
+    # uncompressed YUYV mode runs out of USB bandwidth and the driver
+    # silently caps the rate -- measured 9 FPS vs 29 FPS at 1280x720 on the
+    # Jetson's UGREEN cam. That starves the temporal head (its 30-frame clip
+    # would span 3 s instead of 1 s) and delays fall alerts by seconds. Set
+    # to "" / "none" to let the driver negotiate (raw YUYV, non-USB sources).
+    fourcc: str = "MJPG"
 
 
 @dataclass
@@ -112,6 +119,18 @@ class WristbandConfig:
     has_ppg_raw: bool = True          # ESP32 streams raw MAX30102 samples (vs. pre-computed BPM).
     ppg_sample_rate_hz: int = 100     # MAX30102 default sample rate.
 
+    # --- Heart-rate source --------------------------------------------------
+    # "hardware": BPM comes from the wristband (raw PPG or pre-computed).
+    # "simulated": the MAX30102 is dead/absent, so a synthetic resting
+    #   waveform stands in for it (kineticpulse.sensors.ppg_sim). Motion still
+    #   comes from the hardware transport. Pulse loss and the cardiac tier
+    #   CANNOT fire in this mode, so it is for bench work only - every
+    #   surface labels the heart rate as simulated.
+    ppg_source: str = "hardware"      # hardware | simulated
+    ppg_sim_resting_bpm: float = 72.0 # baseline BPM for ppg_source=simulated
+    ppg_sim_hrv_sd_ms: float = 22.0   # beat-to-beat variability (resting SDNN)
+    ppg_sim_seed: int = 0             # RNG seed; keeps bench runs reproducible
+
 
 @dataclass
 class ThresholdsConfig:
@@ -200,6 +219,34 @@ class MonitoringConfig:
     enabled: bool = True
     host: str = "0.0.0.0"
     port: int = 8790
+
+    # --- Scenario control panel ---------------------------------------------
+    # Exposes POST /control/* so the dashboard can switch the synthetic
+    # scenario at runtime instead of restarting the pipeline.
+    #
+    # OFF BY DEFAULT, and deliberately so: activating a Tier-2 scenario runs
+    # the whole emergency path - real webhooks to alerts.webhooks, a WebRTC
+    # session, the voice prompt. It also only works when the runtime is
+    # driving synthetic sensors (--mock-ble); against real hardware the panel
+    # reports itself unavailable. Bench use only. Bind `host` to 127.0.0.1 if
+    # the Jetson is on a shared network.
+    control_enabled: bool = False
+
+    # --- Detection feed ------------------------------------------------------
+    # Publishes the annotated preview overlay (posture box, skeleton, motion
+    # and fusion panels) as MJPEG at GET /preview.mjpg, which is what the
+    # dashboard's Detection panel renders.
+    #
+    # OFF BY DEFAULT: unlike the vitals envelope, this is live video of a
+    # person's home on an unauthenticated port. Turn it on for a bench or a
+    # deployment where the dashboard is the only reachable client, and bind
+    # `host` to 127.0.0.1 if the Jetson shares a network. It also costs a JPEG
+    # encode per frame on a background thread (~6 ms at 1280x720 on an Orin),
+    # which the render path drops rather than waits for.
+    preview_stream: bool = False
+    preview_stream_every: int = 1     # encode every Nth processed frame
+    preview_stream_quality: int = 72  # JPEG quality, 1-100
+    preview_stream_max_clients: int = 4
 
 
 @dataclass

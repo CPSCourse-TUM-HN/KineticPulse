@@ -69,17 +69,16 @@ class CameraVideoTrack:
             self._cap = None
 
     def _open_capture(self) -> None:
+        from kineticpulse.vision.capture import open_device_capture
+
         device_str = str(self._camera_cfg.device)
         device = int(device_str) if device_str.isdigit() else device_str
-        cap = self._cv2.VideoCapture(device, self._cv2.CAP_ANY)
-        if not cap.isOpened():
+        # Same negotiation as the runtime capture thread -- MJPG first, then
+        # the frame size. Opening a UVC webcam without it drops the caregiver
+        # preview to the driver's default uncompressed mode.
+        cap = open_device_capture(self._cv2, device, self._camera_cfg)
+        if cap is None:
             raise RuntimeError(f"Could not open camera for WebRTC: {device_str}")
-        if self._camera_cfg.width > 0:
-            cap.set(self._cv2.CAP_PROP_FRAME_WIDTH, self._camera_cfg.width)
-        if self._camera_cfg.height > 0:
-            cap.set(self._cv2.CAP_PROP_FRAME_HEIGHT, self._camera_cfg.height)
-        if self._camera_cfg.fps > 0:
-            cap.set(self._cv2.CAP_PROP_FPS, self._camera_cfg.fps)
         self._cap = cap
         log.info("WebRTC camera capture opened (device=%s)", device_str)
 

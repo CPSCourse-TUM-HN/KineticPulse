@@ -26,7 +26,6 @@
     },
     "android": {
       "package": "de.tum.kineticpulse.caregiver",
-      "usesCleartextTraffic": true,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"

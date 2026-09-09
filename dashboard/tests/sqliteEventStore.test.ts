@@ -64,7 +64,7 @@ describe("SQLiteEventStore", () => {
       const migration = db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number };
 
       expect(tables.map((row) => row.name)).toContain("monitoring_events");
-      expect(migration.version).toBe(2);
+      expect(migration.version).toBe(3);
       expect(indexes.map((row) => row.name)).toContain("idx_monitoring_events_timestamp_utc");
     } finally {
       db.close();
@@ -112,7 +112,8 @@ describe("SQLiteEventStore", () => {
                 scenario_type, severity, title, detail, system_status, device_connection_status,
                 heart_rate_bpm, imu_state, vision_state, fall_confidence, fall_detected,
                 emergency_tier, voice_verification_status, alert_dispatch_status,
-                normalized_payload_json, created_at_utc FROM monitoring_events LIMIT 1`
+                normalized_payload_json, created_at_utc, heart_rate_simulated
+         FROM monitoring_events LIMIT 1`
       ).run()).toThrow(/UNIQUE constraint failed: monitoring_events\.source, monitoring_events\.source_event_id/);
     } finally {
       db.close();

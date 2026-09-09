@@ -46,6 +46,14 @@ def parse_args() -> argparse.Namespace:
                    help="FP16 export (recommended for TensorRT engine on Jetson).")
     p.add_argument("--int8", action="store_true",
                    help="INT8 quantisation (TensorRT engine; needs calibration data).")
+    p.add_argument("--data", type=Path, default=None,
+                   help="Dataset YAML used to calibrate an INT8 engine. Required "
+                        "with --int8: TensorRT needs real activations to pick "
+                        "per-tensor scales, and without this Ultralytics silently "
+                        "falls back to downloading COCO8, which calibrates the "
+                        "model on the wrong domain.")
+    p.add_argument("--fraction", type=float, default=1.0,
+                   help="Fraction of the calibration split to use (--int8 only).")
     p.add_argument("--dynamic", action="store_true",
                    help="Dynamic shape ONNX export (variable batch / imgsz).")
     p.add_argument("--simplify", action="store_true", default=True,
@@ -88,7 +96,7 @@ def main() -> int:
     print(f"Formats : {formats}")
     print(f"Imgsz   : {args.imgsz}")
     print(f"FP16    : {args.half}")
-    print(f"INT8    : {args.int8}")
+    print(f"INT8    : {args.int8}" + (f" (calib: {args.data})" if args.int8 else ""))
     print(f"Dynamic : {args.dynamic}")
     print(f"Device  : {args.device or 'auto'}")
     print("=" * 64)
@@ -108,6 +116,18 @@ def main() -> int:
         if not formats:
             return 1
 
+    if args.int8 and "engine" in formats:
+        if args.data is None:
+            print("[error] --int8 requires --data pointing at a calibration "
+                  "dataset YAML. Calibrating on someone else's images gives "
+                  "wrong activation scales and a quietly worse model.",
+                  file=sys.stderr)
+            return 2
+        if not args.data.exists():
+            print(f"[error] calibration dataset not found: {args.data}",
+                  file=sys.stderr)
+            return 2
+
     model = YOLO(str(args.weights))
     outputs: List[Path] = []
     for fmt in formats:
@@ -119,6 +139,9 @@ def main() -> int:
             kwargs["half"] = True
         if args.int8 and fmt == "engine":
             kwargs["int8"] = True
+            kwargs["data"] = str(args.data)
+            if args.fraction != 1.0:
+                kwargs["fraction"] = args.fraction
 
         out = model.export(**kwargs)
         out_path = Path(out) if out else None

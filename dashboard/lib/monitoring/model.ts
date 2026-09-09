@@ -12,6 +12,41 @@ export type VisionState = "stand" | "sitting" | "falling" | "fallen" | "no_resul
 export type VoiceVerificationStatus = "not_required" | "pending" | "safe" | "distress" | "unknown";
 export type AlertDispatchStatus = "idle" | "pending" | "sent" | "failed";
 export type MonitoringSeverity = "info" | "warning" | "critical";
+/**
+ * Where the heart rate came from. "simulated" means the MAX30102 is not
+ * supplying data and a synthetic waveform is standing in, so pulse loss and
+ * the cardiac tier cannot fire - the UI must say so rather than render the
+ * BPM as a real vital. See kineticpulse/sensors/ppg_sim.py.
+ */
+export type PpgSource = "hardware" | "simulated";
+export type RuntimeHealth = "ok" | "degraded" | "critical" | "unknown";
+export type Accelerator = "cuda" | "cpu" | "unknown";
+export type InferenceBackend = string;
+
+/**
+ * Edge runtime health. Surfaced to the caregiver because a CPU fallback is a
+ * safety regression, not just a slow one: the same pipeline runs ~16 FPS on
+ * the Jetson GPU and ~0.65 FPS on the CPU, and a fall lasts under a second.
+ */
+export interface RuntimeInfo {
+  health: RuntimeHealth;
+  accelerator: Accelerator;
+  acceleratorDevice: string | null;
+  visionFps: number | null;
+  detectorBackend: InferenceBackend | null;
+  poseBackend: InferenceBackend | null;
+}
+/**
+ * Provenance of the telemetry behind a snapshot. `drill: true` means a
+ * scripted scenario is driving the pipeline from the control panel, so the
+ * fall on screen is synthetic. See kineticpulse/control.py.
+ */
+export interface SimulationInfo {
+  drill: boolean;
+  sensorSource: "hardware" | "mock";
+  ppgSource: PpgSource;
+  scenario: string | null;
+}
 
 export interface MonitoringEvent {
   id: string;
@@ -38,6 +73,8 @@ export interface MonitoringModel {
   heartRate: {
     bpm: number | null;
     status: HeartRateStatus;
+    /** True when the BPM is synthetic; render it as not-a-real-vital. */
+    simulated: boolean;
   };
   motion: {
     state: MotionState;
@@ -63,6 +100,9 @@ export interface MonitoringModel {
   alertDispatch: {
     status: AlertDispatchStatus;
   };
+  /** Never omitted: a marker that appears only during drills gets ignored. */
+  simulation: SimulationInfo;
+  runtime: RuntimeInfo;
   recentEvents: MonitoringEvent[];
 }
 
@@ -75,13 +115,14 @@ export interface MonitoringWirePayload {
   subject_id: string;
   location: string;
   system: { connection: ConnectionStatus };
-  sensor: { connection: ConnectionStatus };
+  sensor: { connection: ConnectionStatus; ppg_source?: PpgSource };
   snapshot: {
     decision: { tier: EmergencyLevel; scenario: string; reason: string };
     pose: string;
     accel: string;
     hr: string;
     latest_hr_bpm: number | null;
+    hr_simulated?: boolean;
     latest_accel_g: number | null;
     detector_class: VisionState | null;
     detector_conf: number | null;
@@ -91,6 +132,20 @@ export interface MonitoringWirePayload {
   };
   voice: { status: VoiceVerificationStatus };
   alert_dispatch: { status: AlertDispatchStatus };
+  simulation?: {
+    drill: boolean;
+    sensor_source: "hardware" | "mock";
+    ppg_source: PpgSource;
+    scenario: string | null;
+  };
+  runtime?: {
+    health: RuntimeHealth;
+    accelerator: Accelerator;
+    accelerator_device: string | null;
+    vision_fps: number | null;
+    detector_backend: string | null;
+    pose_backend: string | null;
+  };
   events: Array<{
     id: string;
     timestamp_ms: number;

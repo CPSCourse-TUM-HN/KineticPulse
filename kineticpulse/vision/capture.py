@@ -6,12 +6,17 @@ GStreamer pipeline strings are written to take advantage of NVDEC /
 ``nvarguscamerasrc`` on Jetson when OpenCV has been built with GStreamer
 support (the JetPack OpenCV does).
 
+USB webcams go through :func:`open_device_capture`, which negotiates the
+capture format explicitly (MJPG first -- see :attr:`CameraConfig.fourcc`)
+instead of accepting whatever the driver picks by default.
+
 The :class:`FrameQueue` is a thread-safe bounded queue with drop-oldest
 backpressure to keep latency bounded (PRD: tight time-sync).
 """
 
 from __future__ import annotations
 
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -25,6 +30,99 @@ from kineticpulse.utils.logging import get_logger
 from kineticpulse.utils.timing import now_ms
 
 log = get_logger(__name__)
+
+
+
+def _fourcc_name(cv2, cap) -> str:
+    """Read back the negotiated FOURCC as a 4-character string."""
+    raw = int(cap.get(cv2.CAP_PROP_FOURCC))
+    if raw <= 0:
+        return "????"
+    return "".join(chr((raw >> (8 * i)) & 0xFF) for i in range(4))
+
+
+def open_device_capture(cv2, device: Union[str, int], cfg: CameraConfig):
+    """Open a V4L2 / UVC capture device with the format negotiated explicitly.
+
+    Shared by the runtime capture thread and the WebRTC track so both open
+    the camera the same way. Three things matter and none of them are the
+    OpenCV default:
+
+    * **Backend.** ``CAP_V4L2`` is requested first on Linux; the generic
+      ``CAP_ANY`` probe can land on a backend that ignores ``CAP_PROP_FOURCC``.
+    * **FOURCC before the frame size.** V4L2 resolves the format at the
+      first ``set()``, so requesting MJPG after the size leaves the device
+      in YUYV -- which on a UVC webcam caps 1280x720 at ~7 FPS.
+    * **A shallow driver buffer.** V4L2 defaults to 4 queued frames, so a
+      frame can be ~4 frame-periods stale before the fusion engine sees it.
+      Two is the floor that still lets the driver fill the next buffer while
+      we decode the current one: measured on the Jetson's UGREEN cam at
+      1280x720 MJPG, BUFFERSIZE 2 and 4 both sustain 28.7 FPS, while 1
+      collapses to 14.3 FPS because every ``read()`` waits a full frame.
+
+    Returns an opened ``VideoCapture``, or ``None`` if no backend opened it.
+    """
+    backends = [("V4L2", cv2.CAP_V4L2), ("ANY", cv2.CAP_ANY)]
+    if not sys.platform.startswith("linux"):
+        backends = [("ANY", cv2.CAP_ANY)]
+
+    for name, backend in backends:
+        cap = cv2.VideoCapture(device, backend)
+        if not cap.isOpened():
+            cap.release()
+            continue
+
+        wanted = (cfg.fourcc or "").strip().upper()
+        if wanted and wanted not in ("NONE", "AUTO") and len(wanted) == 4:
+            try:
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*wanted))
+            except Exception:  # pragma: no cover - backend/driver dependent
+                log.debug("Backend %s rejected FOURCC %s", name, wanted)
+        if cfg.width > 0:
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, cfg.width)
+        if cfg.height > 0:
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, cfg.height)
+        if cfg.fps > 0:
+            cap.set(cv2.CAP_PROP_FPS, cfg.fps)
+        try:
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
+        except Exception:  # pragma: no cover - not all backends expose it
+            pass
+
+        # Some UVC webcams hand out nothing until a few reads have gone by,
+        # and a device that opens but never delivers is worse than one that
+        # fails to open -- the capture thread would just log read failures.
+        ready = False
+        for _ in range(5):
+            ok, _img = cap.read()
+            if ok and _img is not None:
+                ready = True
+                break
+            time.sleep(0.05)
+        if not ready:
+            log.warning("Backend %s opened %r but delivered no frame.", name, device)
+            cap.release()
+            continue
+
+        got_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        got_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        got_fourcc = _fourcc_name(cv2, cap)
+        log.info("Camera %r opened via %s: %dx%d %s @ %.0f FPS",
+                 device, name, got_w, got_h, got_fourcc,
+                 cap.get(cv2.CAP_PROP_FPS))
+        if (cfg.width, cfg.height) != (got_w, got_h):
+            log.warning("Requested %dx%d but the device negotiated %dx%d; "
+                        "keypoint normalisation in temporal.image_width/height "
+                        "should match the negotiated size.",
+                        cfg.width, cfg.height, got_w, got_h)
+        if wanted and wanted not in ("NONE", "AUTO") and got_fourcc != wanted:
+            log.warning("Requested FOURCC %s but the device negotiated %s. "
+                        "Uncompressed modes often cap the frame rate well "
+                        "below camera.fps at this resolution.",
+                        wanted, got_fourcc)
+        return cap
+
+    return None
 
 
 @dataclass
@@ -72,7 +170,17 @@ class FrameQueue:
 
 
 class FrameSource:
-    """Base class. Concrete sources override :meth:`_pipeline`."""
+    """Base class. Concrete sources override :meth:`_pipeline`.
+
+    ``capture_kind`` selects how :meth:`open` hands the spec to OpenCV:
+    ``"gstreamer"`` treats it as a pipeline string, ``"device"`` as a V4L2
+    capture device to be configured by :func:`open_device_capture`. It is a
+    class attribute rather than a check on the spec type because a USB
+    webcam may legitimately be addressed by path (``/dev/video0``) instead
+    of by index, and a path is not a GStreamer pipeline.
+    """
+
+    capture_kind = "gstreamer"
 
     def __init__(self, cfg: CameraConfig) -> None:
         self.cfg = cfg
@@ -89,16 +197,19 @@ class FrameSource:
         import cv2
 
         spec = self._pipeline()
-        if isinstance(spec, str):
+        if self.capture_kind == "device":
+            self._cap = open_device_capture(cv2, spec, self.cfg)
+            if self._cap is None:
+                raise RuntimeError(
+                    f"Failed to open camera device {spec!r}. Check that it is "
+                    f"listed in /dev/video*, that this user is in the 'video' "
+                    f"group, and that no other process holds the camera."
+                )
+        else:
             self._cap = cv2.VideoCapture(spec, cv2.CAP_GSTREAMER)
             if not self._cap.isOpened():
                 log.warning("GStreamer pipeline failed, falling back to default backend.")
                 self._cap = cv2.VideoCapture(spec)
-        else:
-            self._cap = cv2.VideoCapture(spec)
-            self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.cfg.width)
-            self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.cfg.height)
-            self._cap.set(cv2.CAP_PROP_FPS, self.cfg.fps)
 
         if not self._cap.isOpened():
             raise RuntimeError(f"Failed to open camera source: {spec!r}")
@@ -135,6 +246,8 @@ class FrameSource:
 
 
 class UsbWebcam(FrameSource):
+    capture_kind = "device"
+
     def _pipeline(self) -> Union[str, int]:
         try:
             return int(self.cfg.device)

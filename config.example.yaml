@@ -12,12 +12,27 @@ camera:
   width: 1280
   height: 720
   fps: 30
+  fourcc: MJPG             # MJPG | YUYV | "" (let the driver choose)
+                           # UVC webcams only reach 720p+ at full frame rate
+                           # on MJPG. Measured on the Jetson's UGREEN cam
+                           # (0c45:2283) through the runtime capture thread:
+                           # 1280x720 YUYV = 8.8 FPS, MJPG = 28.7 FPS.
 
 detector:
   # 4-class checkpoint (fallen / falling / stand / sitting). Use the .onnx
   # or the TensorRT .engine on the Jetson once you've converted them.
   weights: runs/detect/kp_v2_4cls/weights/best.pt
-  conf: 0.5
+  # Measured on the 111-image held-out val split in archive.zip (70 fall /
+  # 41 not-fallen) with this checkpoint, counting fallen|falling as a fall:
+  #   conf 0.50 -> 80% fall recall,  7% false-alarm rate   <- previous value
+  #   conf 0.40 -> 93% fall recall, 10%
+  #   conf 0.25 -> 96% fall recall, 17%                    <- chosen
+  #   conf 0.20 -> 99% fall recall, 20%
+  # 0.50 missed 13 of 70 real falls outright. A missed fall leaves someone on
+  # the floor; a false alarm only costs an "are you okay?" voice prompt, and
+  # temporal.hysteresis_min_consecutive=3 already discards transient per-frame
+  # flips. Recall is therefore weighted well above precision here.
+  conf: 0.25
   iou: 0.45
   imgsz: 640
   device: auto             # auto | cpu | 0 | 0,1
@@ -86,6 +101,20 @@ wristband:
                            #   directly (e.g. via the standard 0x2A37 characteristic
                            #   on BLE, or {"type":"hr","bpm":...} on TCP).
   ppg_sample_rate_hz: 100  # MAX30102 sample rate (typical: 50/100/200 Hz).
+
+  # --- Heart-rate source --------------------------------------------------
+  # hardware  : BPM comes from the wristband (raw PPG above, or pre-computed).
+  # simulated : the MAX30102 is dead/absent. A synthetic resting waveform
+  #             (kineticpulse.sensors.ppg_sim) stands in so the PPG -> BPM ->
+  #             fusion -> dashboard path keeps running; motion still comes
+  #             from the real transport.
+  #             BENCH ONLY. Pulse loss and the cardiac tier cannot fire in
+  #             this mode, and the heart rate is labelled "simulated" in the
+  #             logs, the monitoring payload, the dashboard and every alert.
+  ppg_source: hardware     # hardware | simulated
+  ppg_sim_resting_bpm: 72  # baseline BPM when ppg_source=simulated
+  ppg_sim_hrv_sd_ms: 22    # beat-to-beat variability (healthy resting SDNN)
+  ppg_sim_seed: 0          # RNG seed; keeps bench runs reproducible
 
 thresholds:
   # Heart-rate bands (BPM)
@@ -177,6 +206,32 @@ monitoring:
   enabled: true
   host: "0.0.0.0"
   port: 8790               # GET http://<host>:8790/monitoring
+
+  # --- Scenario control panel ---------------------------------------------
+  # Lets the dashboard switch the synthetic scenario at runtime
+  # (POST /control/scenario) instead of restarting the pipeline.
+  #
+  # OFF BY DEFAULT. Activating a Tier-2 scenario runs the real emergency
+  # path: webhooks to alerts.webhooks, a WebRTC session, the voice prompt.
+  # It also only works with --mock-ble (synthetic sensors); against real
+  # hardware the panel reports itself unavailable. Bench use only - and bind
+  # `host` above to 127.0.0.1 if the Jetson shares a network.
+  control_enabled: false
+
+  # --- Detection feed -----------------------------------------------------
+  # Publishes the annotated overlay (posture box, COCO-17 skeleton, motion and
+  # fusion panels) as MJPEG at GET /preview.mjpg, which is what the
+  # dashboard's Detection panel renders. GET /preview.jpg serves one frame.
+  #
+  # OFF BY DEFAULT. Unlike the vitals envelope this is live video of a
+  # person's home on an unauthenticated port: anything that can reach it can
+  # watch. Bind `host` above to 127.0.0.1 unless the dashboard is remote.
+  # A feed that stops producing is reported unavailable and the stream is
+  # closed, so the panel says so instead of showing a frozen room.
+  preview_stream: false
+  preview_stream_every: 1        # encode every Nth processed frame
+  preview_stream_quality: 72     # JPEG quality 1-100; ~6 ms/frame at 720p
+  preview_stream_max_clients: 4  # concurrent viewers before 503
 
 logging:
   level: INFO              # DEBUG | INFO | WARNING | ERROR

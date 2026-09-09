@@ -11,10 +11,30 @@ from dataclasses import dataclass, field
 from typing import Deque, Dict, List, Optional
 
 
+#: Vision throughput below this reads as degraded on the dashboard. A fall
+#: lasts well under a second, so a handful of frames per second is the point
+#: at which the detector starts stepping over the event entirely. Measured on
+#: an Orin Nano: 16-17 FPS healthy on the GPU, 0.65 FPS on the CPU fallback.
+VISION_FPS_WARN = 10.0
+VISION_FPS_CRITICAL = 5.0
+
+
 @dataclass
 class CaregiverRuntimeStatus:
     voice_status: str = "not_required"
     alert_dispatch_status: str = "idle"
+
+    # --- Runtime health ---------------------------------------------------- #
+    # Surfaced to the dashboard because a silent CPU fallback is a safety
+    # regression, not just a performance one: the same pipeline that runs at
+    # 16 FPS on the GPU runs at 0.65 FPS on the CPU and steps over falls. It
+    # used to be visible only in the logs, which nobody watches.
+    accelerator: str = "unknown"          # "cuda" | "cpu" | "unknown"
+    accelerator_device: Optional[str] = None
+    vision_fps: Optional[float] = None
+    detector_backend: Optional[str] = None    # tensorrt | pytorch | onnx | ...
+    pose_backend: Optional[str] = None
+
     _events: Deque[Dict] = field(default_factory=lambda: collections.deque(maxlen=40))
     _event_seq: int = 0
 
@@ -23,6 +43,47 @@ class CaregiverRuntimeStatus:
 
     def set_alert(self, status: str) -> None:
         self.alert_dispatch_status = status
+
+    def set_accelerator(self, kind: str, device: Optional[str] = None) -> None:
+        self.accelerator = kind
+        self.accelerator_device = device
+
+    def set_vision_fps(self, fps: Optional[float]) -> None:
+        self.vision_fps = fps
+
+    def set_backends(
+        self,
+        detector: Optional[str] = None,
+        pose: Optional[str] = None,
+    ) -> None:
+        if detector is not None:
+            self.detector_backend = detector
+        if pose is not None:
+            self.pose_backend = pose
+
+    def runtime_payload(self) -> Dict:
+        """Runtime health for the dashboard's ``runtime`` block."""
+        fps = self.vision_fps
+        if self.accelerator == "cpu":
+            health = "critical"
+        elif fps is None:
+            health = "unknown"
+        elif fps < VISION_FPS_CRITICAL:
+            health = "critical"
+        elif fps < VISION_FPS_WARN:
+            health = "degraded"
+        else:
+            health = "ok"
+        return {
+            "health": health,
+            "accelerator": self.accelerator,
+            "accelerator_device": self.accelerator_device,
+            "vision_fps": round(fps, 1) if fps is not None else None,
+            "detector_backend": self.detector_backend,
+            "pose_backend": self.pose_backend,
+            "fps_warn_below": VISION_FPS_WARN,
+            "fps_critical_below": VISION_FPS_CRITICAL,
+        }
 
     def push_event(
         self,

@@ -21,7 +21,7 @@ import sys
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 if hasattr(sys.stdout, "reconfigure"):
     try:
@@ -32,15 +32,22 @@ if hasattr(sys.stdout, "reconfigure"):
 
 from kineticpulse.alerts.payload import build_payload
 from kineticpulse.alerts.webhooks import WebhookDispatcher
-from kineticpulse.config import RuntimeConfig, load_config
+from kineticpulse.config import MonitoringConfig, RuntimeConfig, load_config
+from kineticpulse.control import ScenarioController, build_scenario_controller
 from kineticpulse.fusion.engine import FusionEngine, FusionSnapshot
 from kineticpulse.fusion.tiers import EmergencyTier
 from kineticpulse.monitoring import MonitoringPublisher
 from kineticpulse.runtime_status import CaregiverRuntimeStatus
 from kineticpulse.sensors import build_sensor_client
+from kineticpulse.sensors.ppg_sim import (
+    PPG_SOURCE_HARDWARE,
+    PPG_SOURCE_SIMULATED,
+    SIMULATED_HR_NOTICE,
+)
 from kineticpulse.sensors.mock import (
     DEMO_CLI,
     DEMO_PLAYBOOKS,
+    ScenarioClock,
     MOCK_SCENARIOS,
     demo_posture,
 )
@@ -54,6 +61,8 @@ from kineticpulse.vision.capture import Frame, build_source
 from kineticpulse.vision.detector import Detection, FallDetector, PostureClass
 from kineticpulse.vision.features import PoseFeatures, extract_features
 from kineticpulse.vision.pose import PoseEstimator, PoseResult
+from kineticpulse.vision.frame_bus import PreviewFrameBus
+from kineticpulse.vision.preview import PreviewWindow
 from kineticpulse.voice.prompts import PromptPlayer
 from kineticpulse.voice.safe_words import VoiceVerdict, classify_response
 from kineticpulse.voice.stt import build_stt
@@ -90,6 +99,24 @@ def parse_args() -> argparse.Namespace:
                    help="Canned utterance returned by --mock-stt (default: empty = silence).")
     p.add_argument("--no-camera", action="store_true",
                    help="Skip camera + detector (telemetry-only smoke test).")
+    p.add_argument("--preview", action="store_true",
+                   help="Open a live annotated window (detection + motion + fusion "
+                        "overlays) on the frames the pipeline is already processing. "
+                        "Press q or ESC in the window to stop. Needs a display; "
+                        "disables itself with a warning on a headless session.")
+    p.add_argument("--preview-scale", type=float, default=1.0,
+                   help="Scale the preview window (e.g. 0.6 for a 1280x720 capture "
+                        "on a small screen). Does not affect inference.")
+    p.add_argument("--preview-snapshot", metavar="PATH", default=None,
+                   help="Also write the annotated frame to PATH (PNG), refreshed "
+                        "every --preview-snapshot-every frames via an atomic "
+                        "replace. Works over SSH where a window cannot open; "
+                        "implies --preview.")
+    p.add_argument("--preview-snapshot-every", type=int, default=15,
+                   help="Frames between snapshot refreshes (default: 15).")
+    p.add_argument("--no-preview-window", action="store_true",
+                   help="With --preview-snapshot, skip the on-screen window and "
+                        "only write the file.")
     p.add_argument("--max-runtime-s", type=float, default=None,
                    help="Stop the orchestrator after this many seconds (smoke-test / CI).")
     args = p.parse_args()
@@ -116,16 +143,70 @@ _POSTURE = {
 }
 
 
+def _build_preview(
+    args: argparse.Namespace,
+    *,
+    monitoring: Optional[MonitoringConfig] = None,
+    frame_bus: Optional[PreviewFrameBus] = None,
+) -> Optional[PreviewWindow]:
+    """Assemble the preview from the CLI flags, or None when not asked for.
+
+    ``--preview-snapshot`` implies ``--preview``: asking for the file is
+    asking for the overlay, and requiring both flags is a trap.
+
+    A ``frame_bus`` is the third way to ask. The dashboard's Detection panel
+    needs the same overlay, and the operator enables it in the config
+    (``monitoring.preview_stream``) rather than on the command line - the
+    dashboard is a deployment feature, not a debugging flag, and it has to
+    survive a systemd restart. So a bus alone is enough to build the preview,
+    with no window and no snapshot file.
+
+    Read with ``getattr`` defaults because :func:`run` is also called
+    programmatically with a hand-built ``Namespace`` (see
+    ``tests/test_pipeline_smoke.py``); such a caller has not opted into the
+    preview and must not have to know the flag exists.
+    """
+    snapshot = getattr(args, "preview_snapshot", None)
+    wants_overlay = getattr(args, "preview", False) or snapshot
+    if not wants_overlay and frame_bus is None:
+        return None
+    mon = monitoring or MonitoringConfig()
+    return PreviewWindow(
+        scale=getattr(args, "preview_scale", 1.0),
+        # A feed-only preview must not try to open a window: the Jetson is
+        # normally headless, and asking would only log a warning per run.
+        window=(
+            bool(wants_overlay)
+            and not getattr(args, "no_preview_window", False)
+        ),
+        snapshot_path=snapshot,
+        snapshot_every=getattr(args, "preview_snapshot_every", 15),
+        frame_bus=frame_bus,
+        stream_every=mon.preview_stream_every,
+        stream_quality=mon.preview_stream_quality,
+    )
+
+
 async def _script_demo_posture(
     detections_q: "asyncio.Queue[Detection]",
     stop: asyncio.Event,
-    scenario: str,
+    clock: ScenarioClock,
 ) -> None:
-    """Script detector class from the playbook — no camera, no real person."""
-    log.info("Demo vision: scenario=%s", scenario)
-    t0 = now_ms()
+    """Script detector class from the playbook — no camera, no real person.
+
+    Reads the same :class:`ScenarioClock` as the synthetic sensors, so a
+    control-panel switch restarts posture and telemetry at one shared t=0
+    instead of letting them drift apart. Scenarios without a posture
+    script (``resting``, the coarse ``fall_*`` ones) emit nothing, which is
+    what ``--no-camera`` did for them before the panel existed.
+    """
+    log.info("Demo vision: following scenario clock (scenario=%s)", clock.scenario)
     while not stop.is_set():
-        label = demo_posture(scenario, (now_ms() - t0) / 1000.0)
+        scenario, t_s = clock.scenario, clock.elapsed_s
+        if scenario not in DEMO_PLAYBOOKS:
+            await asyncio.sleep(0.2)
+            continue
+        label = demo_posture(scenario, t_s)
         fallen = label == "fallen"
         det = Detection(
             bbox_xyxy=(140.0, 220.0, 520.0, 680.0),
@@ -153,15 +234,25 @@ async def _vision_worker(
     actions_q: "asyncio.Queue[ActionLogits]",
     stop: asyncio.Event,
     no_camera: bool,
-    scenario: str = "resting",
+    scenario_clock: Optional[ScenarioClock] = None,
+    preview: Optional[PreviewWindow] = None,
+    latest_snapshot: Optional[Callable[[], Optional[FusionSnapshot]]] = None,
+    latest_simulation: Optional[Callable[[], dict]] = None,
+    runtime_status: Optional[CaregiverRuntimeStatus] = None,
 ) -> None:
     if no_camera:
-        if scenario in DEMO_PLAYBOOKS:
-            await _script_demo_posture(detections_q, stop, scenario)
+        if scenario_clock is not None:
+            await _script_demo_posture(detections_q, stop, scenario_clock)
         else:
             log.info("--no-camera set; skipping capture loop.")
             await stop.wait()
         return
+
+    if runtime_status is not None:
+        runtime_status.set_backends(
+            detector=_backend_of(cfg.detector.weights) if detector else None,
+            pose=_backend_of(cfg.pose.weights) if pose else None,
+        )
 
     source = build_source(cfg.camera)
     source.start()
@@ -169,9 +260,28 @@ async def _vision_worker(
 
     keypoint_buffer = KeypointRingBuffer(maxlen=cfg.temporal.window_size)
     temporal_head = TemporalHead(cfg.temporal)
+    # Throughput logging. The pipeline had none, which is how a silent CPU
+    # fallback (0.65 FPS instead of 5) went unnoticed: nothing ever said how
+    # fast vision was actually running.
+    #
+    # The reported span uses temporal.sequence_length, not window_size: the
+    # ring buffer may be larger, but TsstgClassifier right-aligns the clip to
+    # sequence_length frames, so that is what the model actually sees. The
+    # checkpoint was trained on 30-frame clips at ~30 FPS (~1 s of motion), so
+    # a much longer span here means actions look slower to the model than they
+    # did in training.
+    fps_log_period_s = 10.0
+    fps_window_start_ms: Optional[int] = None
+    fps_frames = 0
     prev_pose: Optional[PoseResult] = None
     loop = asyncio.get_event_loop()
     executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="vision")
+
+    # The window has to be created and drawn on one thread, and Qt wants the
+    # main one. This coroutine runs on the event loop, so opening it here (not
+    # in run()) keeps every cv2 GUI call on the same thread.
+    if preview is not None and not preview.open():
+        preview = None
 
     try:
         while not stop.is_set():
@@ -213,6 +323,37 @@ async def _vision_worker(
             except asyncio.QueueFull:
                 pass
 
+            if preview is not None:
+                keep_going = preview.render(
+                    frame.image,
+                    timestamp_ms=frame.timestamp_ms,
+                    detection=best_det,
+                    pose=best_pose,
+                    features=features,
+                    snapshot=latest_snapshot() if latest_snapshot else None,
+                    simulation=latest_simulation() if latest_simulation else None,
+                )
+                if not keep_going:
+                    stop.set()
+
+            if fps_window_start_ms is None:
+                fps_window_start_ms = frame.timestamp_ms
+            fps_frames += 1
+            elapsed_s = (frame.timestamp_ms - fps_window_start_ms) / 1000.0
+            if elapsed_s >= fps_log_period_s:
+                fps = fps_frames / elapsed_s
+                if runtime_status is not None:
+                    runtime_status.set_vision_fps(fps)
+                clip_frames = cfg.temporal.sequence_length
+                log.info(
+                    "Vision: %.1f FPS over %.0fs (%d frames); TSSTG sees the "
+                    "last %d frames = ~%.1fs of motion (trained on ~1.0s)",
+                    fps, elapsed_s, fps_frames, clip_frames,
+                    clip_frames / fps if fps > 0 else float("inf"),
+                )
+                fps_window_start_ms = frame.timestamp_ms
+                fps_frames = 0
+
             action = temporal_head.maybe_predict(
                 keypoint_buffer, features, frame.timestamp_ms,
             )
@@ -232,6 +373,8 @@ async def _vision_worker(
                     except asyncio.QueueFull:
                         pass
     finally:
+        if preview is not None:
+            preview.close()
         source.stop()
         executor.shutdown(wait=False)
 
@@ -256,6 +399,8 @@ async def _dispatch_worker(
     args: argparse.Namespace,
     stop: asyncio.Event,
     runtime_status: CaregiverRuntimeStatus,
+    ppg_source: str = PPG_SOURCE_HARDWARE,
+    control: Optional[ScenarioController] = None,
 ) -> None:
     dispatcher = WebhookDispatcher(cfg.alerts.webhooks)
     prompt_player = PromptPlayer()
@@ -301,7 +446,15 @@ async def _dispatch_worker(
             """Fire webhooks and open the live feed for one confirmed emergency."""
             session_id = f"{cfg.webrtc.session_id_prefix}-{uuid.uuid4().hex[:12]}"
             payload = build_payload(
-                cfg.alerts, snap, voice_extra=voice_extra, session_id=session_id
+                cfg.alerts, snap,
+                voice_extra=voice_extra,
+                session_id=session_id,
+                ppg_source=ppg_source,
+                simulation=(
+                    control.simulation_payload(ppg_source=ppg_source)
+                    if control is not None
+                    else None
+                ),
             )
             session_meta = build_session_meta(
                 session_id=session_id,
@@ -450,14 +603,94 @@ async def _dispatch_worker(
 # --------------------------------------------------------------------------- #
 
 
+def _backend_of(weights: object) -> str:
+    """Name the inference backend from the weights suffix, for the dashboard."""
+    suffix = str(weights).rsplit(".", 1)[-1].lower()
+    return {
+        "engine": "tensorrt",
+        "pt": "pytorch",
+        "onnx": "onnx",
+        "torchscript": "torchscript",
+    }.get(suffix, suffix or "unknown")
+
+
+def _log_accelerator_status(
+    no_camera: bool,
+    runtime_status: Optional[CaregiverRuntimeStatus] = None,
+) -> None:
+    """Warn loudly when the vision models are about to run on the CPU.
+
+    On this Jetson the failure is silent and expensive: a generic PyPI torch
+    wheel (built for a CUDA the Tegra driver does not provide) imports fine,
+    reports ``cuda.is_available() == False`` in a buried UserWarning, and the
+    detector plus pose backbone quietly fall back to the CPU - measured at
+    0.65 FPS end-to-end versus 16-17 FPS on the GPU with TensorRT engines. A
+    fall lasts well under a second, so that is the difference between catching
+    one and missing it.
+
+    Almost always the cause is running the system interpreter instead of the
+    project venv, so say that rather than just "CUDA unavailable".
+    """
+    if no_camera:
+        return                      # no vision models will be loaded
+    try:
+        import torch               # noqa: PLC0415 - only needed for this check
+    except Exception as exc:
+        log.warning("PyTorch is not importable (%s); vision will not run.", exc)
+        if runtime_status is not None:
+            runtime_status.set_accelerator("unknown")
+        return
+
+    if torch.cuda.is_available():
+        try:
+            name = torch.cuda.get_device_name(0)
+        except Exception:
+            name = "cuda:0"
+        log.info(
+            "Accelerator: %s (torch %s, CUDA %s)",
+            name, torch.__version__, torch.version.cuda,
+        )
+        if runtime_status is not None:
+            runtime_status.set_accelerator("cuda", name)
+        return
+
+    if runtime_status is not None:
+        runtime_status.set_accelerator("cpu")
+    log.warning(
+        "CUDA IS UNAVAILABLE - the detector and pose backbone will run on the "
+        "CPU, which measured ~0.65 FPS end-to-end on an Orin Nano (vs 16-17 "
+        "FPS on the GPU). Too slow to catch a fall reliably."
+    )
+    log.warning(
+        "  torch %s is built for CUDA %s. Check you are running the project "
+        "venv (./deploy/jetson/run, or source .venv/bin/activate) and not the "
+        "system interpreter; a generic PyPI wheel will not match JetPack's "
+        "CUDA. torch is loaded from: %s",
+        torch.__version__, torch.version.cuda, getattr(torch, "__file__", "?"),
+    )
+
+
 async def run(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
     configure_logging(level=cfg.logging.level, json_format=cfg.logging.json)
     log.info("KineticPulse starting (config=%s, mock_ble=%s, mock_stt=%s, no_camera=%s)",
              args.config, args.mock_ble, args.mock_stt, args.no_camera)
+    # runtime_status is created further down; the accelerator check is
+    # re-run against it there so the dashboard sees the same verdict.
 
-    if args.mock_ble_scenario in DEMO_PLAYBOOKS and not cfg.wristband.has_accelerometer:
-        log.warning("Demo needs IMU samples; forcing wristband.has_accelerometer=true")
+    control_enabled = bool(cfg.monitoring.enabled and cfg.monitoring.control_enabled)
+
+    # The playbooks need accelerometer samples to reach their tiers. With the
+    # control panel on, *any* playbook can be selected later in the run, so
+    # the IMU has to be enabled up front rather than per starting scenario.
+    needs_imu = args.mock_ble_scenario in DEMO_PLAYBOOKS or (
+        control_enabled and args.mock_ble
+    )
+    if needs_imu and not cfg.wristband.has_accelerometer:
+        log.warning(
+            "Scripted scenarios need IMU samples; forcing "
+            "wristband.has_accelerometer=true"
+        )
         cfg.wristband.has_accelerometer = True
 
     detections_q: "asyncio.Queue[Detection]" = asyncio.Queue(maxsize=8)
@@ -487,10 +720,16 @@ async def run(args: argparse.Namespace) -> int:
     # behind cfg.wristband.transport. The factory transparently degrades to
     # the synthetic generator when --mock-ble is set or when transport=ble
     # is selected without a configured MAC.
+    # One clock shared by the synthetic sensors, the scripted-posture loop and
+    # the control panel, so a scenario switch moves all three together.
+    scenario_clock = (
+        ScenarioClock(args.mock_ble_scenario) if args.mock_ble else None
+    )
     sensors = build_sensor_client(
         cfg.wristband, sensor_q,
         mock=args.mock_ble,
         scenario=args.mock_ble_scenario,
+        clock=scenario_clock,
     )
     fusion = FusionEngine(
         cfg=cfg,
@@ -510,6 +749,44 @@ async def run(args: argparse.Namespace) -> int:
             pass
 
     runtime_status = CaregiverRuntimeStatus()
+    _log_accelerator_status(args.no_camera, runtime_status)
+    ppg_source = getattr(sensors, "ppg_source", PPG_SOURCE_HARDWARE)
+    if ppg_source == PPG_SOURCE_SIMULATED:
+        # The caregiver feed is the surface a human actually watches, so the
+        # synthetic pulse has to announce itself there too, not just in the
+        # logs. See kineticpulse.sensors.ppg_sim.
+        log.warning("%s", SIMULATED_HR_NOTICE)
+        runtime_status.push_event(
+            severity="warning",
+            category="sensor",
+            title="Heart rate is simulated",
+            detail=SIMULATED_HR_NOTICE,
+        )
+    control = build_scenario_controller(
+        sensors, enabled=control_enabled, runtime_status=runtime_status
+    )
+    if control_enabled and not control.available:
+        log.warning(
+            "monitoring.control_enabled is set but this runtime has no "
+            "scenario to drive (%s). The panel will report itself "
+            "unavailable.",
+            control.unavailable_reason,
+        )
+
+    # The detection feed the dashboard renders. Built here, not inside the
+    # publisher, because the preview overlay fills it and the HTTP server only
+    # reads it - one object, two owners, so it has to outlive neither.
+    frame_bus: Optional[PreviewFrameBus] = None
+    if cfg.monitoring.enabled and cfg.monitoring.preview_stream:
+        if args.no_camera:
+            log.warning(
+                "monitoring.preview_stream is set but this runtime has no "
+                "camera (--no-camera). The dashboard Detection panel will "
+                "report the feed as unavailable."
+            )
+        else:
+            frame_bus = PreviewFrameBus()
+
     monitoring: Optional[MonitoringPublisher] = None
     if cfg.monitoring.enabled:
         monitoring = MonitoringPublisher(
@@ -519,6 +796,9 @@ async def run(args: argparse.Namespace) -> int:
             latest_snapshot=lambda: fusion.latest,
             sensors=sensors,
             runtime_status=runtime_status,
+            control=control,
+            frames=frame_bus,
+            preview_max_clients=cfg.monitoring.preview_stream_max_clients,
         )
 
     tasks = [
@@ -526,10 +806,22 @@ async def run(args: argparse.Namespace) -> int:
         asyncio.create_task(fusion.run(), name="fusion"),
         asyncio.create_task(_vision_worker(
             cfg, detector, pose, detections_q, features_q, actions_q, stop,
-            args.no_camera, args.mock_ble_scenario,
+            args.no_camera, scenario_clock,
+            preview=_build_preview(
+                args, monitoring=cfg.monitoring, frame_bus=frame_bus
+            ),
+            latest_snapshot=lambda: fusion.latest,
+            latest_simulation=lambda: control.simulation_payload(
+                ppg_source=ppg_source
+            ),
+            runtime_status=runtime_status,
         ), name="vision"),
         asyncio.create_task(
-            _dispatch_worker(cfg, snapshots_q, args, stop, runtime_status),
+            _dispatch_worker(
+                cfg, snapshots_q, args, stop, runtime_status,
+                ppg_source=ppg_source,
+                control=control,
+            ),
             name="dispatch",
         ),
     ]

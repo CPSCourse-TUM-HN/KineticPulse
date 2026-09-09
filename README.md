@@ -186,6 +186,9 @@ Sensors           kineticpulse/sensors/tcp.py        TcpSensorServer (production
                   kineticpulse/sensors/mock.py       MockSensorClient (transport-agnostic)
                   kineticpulse/sensors/parser.py     SensorEvent + binary BLE decoders
                   kineticpulse/sensors/ppg.py        MAX30102 raw-PPG -> BPM
+                  kineticpulse/sensors/ppg_sim.py    synthetic PPG (bench only)
+                  kineticpulse/control.py            runtime scenario control (bench only)
+                  kineticpulse/vision/preview.py     live annotated preview (window or file)
         │
         ▼
 Fusion            kineticpulse/fusion/rules.py       Pose / accel / HR signature primitives
@@ -264,6 +267,310 @@ defaults to `<II` per sample (little-endian uint32 IR then uint32 Red,
 Set `wristband.has_ppg_raw: false` if the firmware sends pre-computed
 HR (BPM) directly instead of raw PPG bursts. Useful for bring-up testing
 with any off-the-shelf compliant HR monitor (Polar strap, etc.).
+
+### Bench mode with a dead pulse sensor
+
+When the MAX30102 is broken or not yet mounted, the firmware stops
+sending `hr` / `ppg` lines entirely. The Jetson then sees no pulse
+sample, `pulse_lost_s` grows without bound, and fusion parks on the
+`PULSE_LOST` cardiac-arrest indicator — which makes the rig useless for
+working on vision, fusion tiers or the dashboard.
+
+`wristband.ppg_source: simulated` fills the gap. A synthetic resting
+waveform ([kineticpulse/sensors/ppg_sim.py](kineticpulse/sensors/ppg_sim.py))
+is pushed through the *real* `PpgProcessor`, so the PPG → BPM → fusion →
+dashboard path keeps running end to end. Motion still comes from the
+hardware transport; only the pulse is substituted.
+
+```yaml
+wristband:
+  ppg_source: simulated     # hardware | simulated
+  ppg_sim_resting_bpm: 72
+  ppg_sim_hrv_sd_ms: 22     # beat-to-beat variability (resting SDNN)
+```
+
+**This is a bench mode, not a fallback.** `latest_hr_bpm` drives a
+cardiac-arrest tier, so a synthetic "normal" BPM that could pass for a
+measured one would suppress `PULSE_LOST` forever — the system would look
+healthy while being structurally unable to report a stopped heart. The
+mode therefore labels itself everywhere the number surfaces:
+
+| Surface | Label |
+|---|---|
+| Logs | `WARNING` at startup, repeated every 60 s |
+| `GET /monitoring` | `sensor.ppg_source: "simulated"`, `snapshot.hr_simulated: true` |
+| Dashboard | Hatched HR tile, "Simulated" badge, "BPM (simulated)", banner |
+| Alert webhooks | `vitals.heart_rate_source`, `vitals.heart_rate_simulated` |
+| Caregiver event feed | Warning-severity "Heart rate is simulated" entry |
+| Event history (SQLite) | `monitoring_events.heart_rate_simulated` |
+
+Do not remove those labels, and do not run a build with
+`ppg_source: simulated` in front of anyone who would read the heart rate
+as real. Covered by [tests/test_ppg_sim.py](tests/test_ppg_sim.py).
+
+### Jetson acceleration — run the venv, not the system interpreter
+
+`python -m kineticpulse.main` only reaches the GPU from the project venv.
+Measured end-to-end on an Orin Nano Super (JetPack 6.2.2, MAXN_SUPER, 1280x720
+capture, detector + yolov8s-pose + TSSTG every frame):
+
+| Setup | torch / CUDA | Vision FPS |
+|---|---|---|
+| system `/usr/bin/python` | 2.12.0+cu130, **unavailable** | 0.65 |
+| `.venv`, PyTorch weights | 2.9.1+cu126, Orin sm_87 | 14.3 |
+| `.venv`, TensorRT FP16 engines | same | **16.2 - 17.4** |
+| `.venv`, engines + `--preview` | same | 13.0 |
+
+The CPU fallback is silent: a wheel built for a CUDA the Tegra driver does not
+provide imports fine and only whispers `cuda.is_available() == False` in a
+buried `UserWarning`. A fall lasts well under a second, so 0.65 FPS is the
+difference between catching one and missing it. The runtime now warns loudly
+at startup when it is about to run on the CPU, names the likely cause, and
+logs actual throughput every 10 s (`Vision: 17.4 FPS over 10s ...`).
+
+Always launch through the venv:
+
+```bash
+./deploy/jetson/run --preview            # activates .venv, then runs main
+# or
+source .venv/bin/activate && python -m kineticpulse.main --config config.yaml
+```
+
+```bash
+.venv/bin/python -c "import torch; print(torch.cuda.is_available(), torch.version.cuda)"
+# -> True 12.6
+```
+
+#### TensorRT engines
+
+At 14.3 FPS the GPU is already saturated (`tegrastats` shows `GR3D_FREQ` at
+91-98%) and the power mode is already `MAXN_SUPER`, so the next lever is
+TensorRT rather than more clock:
+
+```bash
+.venv/bin/python scripts/export.py \
+  --weights runs/detect/kp_v2_4cls/weights/best.pt \
+  --format engine --imgsz 640 --half --device 0
+.venv/bin/python scripts/export.py \
+  --weights yolov8s-pose.pt --format engine --imgsz 640 --half --device 0
+```
+
+Per-model medians at imgsz 640 (same frame repeated — absolutes shift with
+varied frames, the ratio holds):
+
+| Model | PyTorch | TensorRT FP16 | Speedup |
+|---|---|---|---|
+| detector (4-class) | 33.9 ms | 23.5 ms | 1.44x |
+| yolov8s-pose | 31.0 ms | 23.1 ms | 1.34x |
+
+Point `detector.weights` / `pose.weights` at the `.engine` files. Builds take
+~9-12 minutes each on an Orin Nano (TensorRT autotunes kernels), and an engine
+is tied to the machine, the TensorRT version and the `imgsz` it was built for
+— rebuild after a JetPack upgrade rather than copying between devices. The
+`.engine` / `.onnx` artefacts are gitignored for the same reason.
+
+#### What was tried and rejected
+
+Everything below was measured on this hardware. The accuracy-neutral wins are
+applied; the rest are recorded so nobody re-runs the same experiment.
+
+| Change | Speed | Verdict |
+|---|---|---|
+| Project venv instead of system interpreter | 0.65 → 14.3 FPS | **applied** |
+| TensorRT FP16 engines | 14.3 → 17.4 FPS | **applied** |
+| `temporal.window_size` 60 → 30 | warm-up 3.4 s → 1.7 s | **applied** |
+| Off-thread preview snapshot encode | 11.0 → 13.9 FPS (preview on) | **applied** |
+| Detector INT8 engine | 33.3 → 25.5 ms (1.31x) | **rejected — breaks recall** |
+| `max_det` 300 → 10 | detector −1.3 ms, pose +1.8 ms | **rejected — no gain** |
+| `imgsz` 640 → 512 | 1.27x | **not applied — unverifiable cost** |
+| `imgsz` 640 → 416 | 1.22x (worse than 512) | **not applied** |
+
+**INT8 breaks the detector.** Built with domain calibration (374 images from
+`archive.zip`) it is 1.31x faster, but compared against the FP16 engine over
+40 real camera frames:
+
+- 9 of 40 frames: FP16 detected a person, INT8 detected nothing
+- confidence fell by a mean of **0.236** (min 0.154, max 0.316)
+- where both fired, boxes agreed (IoU 0.983) and the class agreed
+
+`detector.conf` is 0.25, deliberately chosen for 96 % fall recall. A uniform
+0.24 confidence drop pushes true detections under that threshold, silently.
+A 15 % frame-rate gain is not worth a 22 % increase in missed detections on a
+fall detector. If you want to revisit it, use entropy calibration rather than
+the MinMax calibrator TensorRT picked, and validate against the primary
+dataset's held-out split — not the frame-agreement proxy used here.
+
+**`imgsz` buys much less than theory.** Dropping to 512 is 0.64x the compute
+but only 1.27x the speed, and the pose model barely responds at all
+(29.3 → 28.4 → 29.2 ms across 640/512/416). Per-call overhead — Python
+pre/post-processing, letterbox, NMS, host↔device copies — dominates, not
+convolution. Further large gains need an architectural change (one backbone
+instead of two), not tuning.
+
+**Not testable here:** `sudo jetson_clocks` pins the CPU/GPU clocks instead of
+letting DVFS ramp (tegrastats showed CPU ramping 1036 → 1651 MHz under load).
+It needs a password so it is not applied; try it and re-read the `Vision: N
+FPS` log line. The GPU is already at its 1020 MHz ceiling, so expect only the
+CPU-side pre/post-processing to benefit.
+
+#### Validating an accuracy change
+
+Absolute recall cannot be measured from a clean checkout: the primary dataset
+that owns the honest `valid`/`test` splits is gitignored, and `archive.zip`'s
+111-image "val" split is entirely duplicated in its own train split (see
+`scripts/prepare_kaggle_fall.py`), so scoring against it measures
+memorisation. Once the primary dataset is in place:
+
+```bash
+.venv/bin/python scripts/eval.py --weights <candidate> --split val
+```
+
+Compare per-class recall for `fallen` and `falling` against the FP16 baseline
+before shipping any quantisation, `imgsz` or backbone change.
+
+#### Temporal window
+
+
+`temporal.sequence_length: 30` is what the TSSTG checkpoint consumes;
+`TsstgClassifier` right-aligns the clip to the newest 30 frames. So
+`temporal.window_size` does **not** change what the model sees — it only gates
+when predictions start (`is_full`). Leaving it at 60 just delayed the first
+action prediction by 3.4 s at 17.4 FPS, so it is now 30.
+
+What the frame rate *does* affect is how much real time those 30 frames cover.
+The checkpoint was trained on 30-frame clips at ~30 FPS (~1.0 s of motion); at
+17.4 FPS the same clip spans ~1.7 s, so actions look slower to the model than
+they did in training. The FPS log line reports this span each interval. Closing
+that gap means either raising the frame rate further (INT8, a smaller pose
+backbone, a lower `imgsz`) or retraining on clips at the deployed rate.
+
+### Edge runtime health on the dashboard
+
+`GET /monitoring` carries a `runtime` block, and the caregiver dashboard shows
+it — an "Edge rate" badge on every run plus a banner when it degrades:
+
+```json
+"runtime": {
+  "health": "ok",            // ok | degraded | critical | unknown
+  "accelerator": "cuda",     // cuda | cpu | unknown
+  "accelerator_device": "Orin",
+  "vision_fps": 16.9,
+  "detector_backend": "tensorrt",
+  "pose_backend": "tensorrt"
+}
+```
+
+This is on the caregiver payload rather than only in the logs because a CPU
+fallback is a **safety** regression, not a performance note: the same pipeline
+runs ~17 FPS on the GPU and ~0.8 FPS on the CPU, and at that rate it steps
+over a fall. `health` is `critical` whenever the accelerator is the CPU or
+`vision_fps` is under 5, and `degraded` under 10 (see `VISION_FPS_WARN` /
+`VISION_FPS_CRITICAL` in `kineticpulse/runtime_status.py`).
+
+Verified end to end by running the pipeline on the system interpreter and
+watching the dashboard report `health: "critical"`, `accelerator: "cpu"`,
+`vision_fps: 0.8`, `detector_backend: "pytorch"`. Both captures are committed
+as `dashboard/tests/.live-payload*.json` and replayed through the real
+components by `dashboard/tests/liveRender.test.tsx`, so a future field rename
+on the Python side fails a test instead of silently blanking a banner.
+
+### Live preview window
+
+`--preview` opens an annotated window on the frames the pipeline is already
+processing, so you can watch what it is deciding while everything runs:
+
+```bash
+python -m kineticpulse.main --config config.yaml --preview --preview-scale 0.75
+```
+
+Three overlays, all fed from state the pipeline already publishes — enabling
+the preview changes no behaviour, but it is not free: measured 17.4 -> 13.0
+FPS with a window plus full-resolution PNG snapshots. The drawing itself is
+1.6 ms; the cost is `imshow` + `waitKey` (~3.7 ms/frame) and the snapshot
+encode. Snapshot encoding runs on a background thread — a 1280x720 PNG takes
+~55 ms, longer than a whole frame budget, and doing it inline cost 6.4 FPS —
+and a snapshot is dropped rather than queued when the previous encode is still
+running. Use a `.jpg` snapshot path (~13 ms) or a larger
+`--preview-snapshot-every` if it still shows up in your frame rate:
+
+| Overlay | Shows |
+|---|---|
+| header | the fusion tier, colour-coded, plus resolution and end-to-end FPS |
+| bbox + skeleton | the 4-class posture detection and the COCO-17 pose |
+| **MOTION** | torso angle, descent velocity, stillness, aspect ratio, and accelerometer \|a\| with its classified signature (`IMPACT`, `IMPACT + TREMOR`, `SOFT COLLAPSE`) |
+| **FUSION** | the three signatures behind the tier, BPM, action class, and the decision reason |
+| provenance band | an amber warning when the telemetry beside the real camera feed is synthetic — a drill, mock sensors, or a simulated heart rate |
+
+Press `q` or `ESC` in the window to stop the pipeline.
+
+**Over SSH**, where no window can open, write the overlay to a file instead —
+the Jetson is normally driven headless (see
+[docs/E2E_LAB.md](docs/E2E_LAB.md)):
+
+```bash
+python -m kineticpulse.main --config config.yaml \
+  --preview-snapshot /tmp/kp-live.png --preview-snapshot-every 15
+```
+
+The file is refreshed via an atomic replace, so a viewer polling it never
+opens a half-written image. `--preview-snapshot` implies `--preview`; add
+`--no-preview-window` to skip the window entirely. The path needs an image
+extension (`.png` / `.jpg`) — OpenCV picks its encoder from the suffix.
+
+The preview never takes the monitor down with it: no display, no GUI backend
+in the OpenCV build, an unwritable snapshot path, or an X server that dies
+mid-run all degrade to one warning and a pipeline that keeps running.
+
+### Scenario control panel
+
+The mock sensor client can replay any PRD scenario, but the choice used to be
+fixed at process start (`--mock-ble-scenario` / `--demo`), so testing four
+scenarios meant four restarts and four model reloads. The control panel makes
+the scenario switchable at runtime:
+
+```yaml
+monitoring:
+  control_enabled: true    # off by default; see the warning below
+```
+
+```bash
+python -m kineticpulse.main --config config.yaml --mock-ble --mock-stt --no-camera
+# then, in the dashboard: http://localhost:3000/control
+```
+
+Pressing a button replays that scenario from t=0. The synthetic telemetry and
+the scripted posture loop share one
+[`ScenarioClock`](kineticpulse/sensors/mock.py), so vision and sensors restart
+together instead of drifting apart. The panel shows the live fusion tier next
+to the buttons, so you can watch a playbook escalate as it plays.
+
+Straight HTTP works too, when the dashboard is not running:
+
+```bash
+curl -s http://127.0.0.1:8790/control | jq            # state + catalogue
+curl -sX POST -d '{"scenario":"trip-fall"}' http://127.0.0.1:8790/control/scenario
+curl -sX POST http://127.0.0.1:8790/control/restart   # replay from t=0
+curl -sX POST http://127.0.0.1:8790/control/reset     # back to resting
+```
+
+**Why it is off by default.** Activating a scenario injects telemetry that the
+fusion engine treats as real, so a Tier-2 scenario runs the *whole* emergency
+path: webhooks fire to whatever `alerts.webhooks` points at, a WebRTC session
+opens, the voice prompt plays. Point the config at a test endpoint first. The
+guard rails:
+
+| Guard | Behaviour |
+|---|---|
+| `monitoring.control_enabled` | Defaults to `false`; the endpoints return `403` until set |
+| Applicability | Only works with `--mock-ble`; against real hardware the panel reports `409` and renders itself disabled |
+| Tier-2 buttons | Two-step in the UI — the first press arms, the second dispatches |
+| Audit | Every activation logs at `WARNING` and lands in the caregiver event feed as a drill |
+| Provenance | `simulation.drill` on `GET /monitoring` **and** on every alert webhook |
+| Dashboard | A drill banner on the caregiver dashboard: "Nothing on this page is a measurement". `--mock-ble` at the resting baseline (no drill) gets a "Synthetic sensors" banner instead — generated telemetry must be labelled even when nothing is escalating |
+| Network | No CORS headers; the browser reaches it only via the dashboard's own server-side route. Bind `monitoring.host` to `127.0.0.1` on a shared network |
+
+The endpoints are unauthenticated, so `control_enabled: true` belongs on a
+bench, never on a deployed unit.
 
 ### Degraded operation without the IMU
 
@@ -513,7 +820,8 @@ KineticPulse/
 │   │   ├── ble.py               # bleak BLE client (legacy / fallback transport)
 │   │   ├── mock.py              # MockSensorClient - scripted PRD scenarios, no hardware
 │   │   ├── parser.py            # SensorEvent + binary BLE decoders
-│   │   └── ppg.py               # MAX30102 raw PPG decoder + on-Jetson HR processor
+│   │   ├── ppg.py               # MAX30102 raw PPG decoder + on-Jetson HR processor
+│   │   └── ppg_sim.py           # synthetic PPG for a dead MAX30102 (labelled, bench only)
 │   ├── voice/
 │   │   ├── stt.py               # faster-whisper STT + MockStt
 │   │   ├── prompts.py           # pyttsx3 voice prompt player
@@ -549,6 +857,9 @@ KineticPulse/
 │   ├── test_fusion_action_logits.py    # ActionLogits ↔ fusion-engine wiring (8)
 │   ├── test_temporal_stabilisation.py  # EMA + hysteresis (6)
 │   ├── test_ppg.py                     # MAX30102 raw decoder + BPM estimator (10)
+│   ├── test_ppg_sim.py                 # synthetic PPG waveform + simulated-HR labelling (24)
+│   ├── test_control.py                 # scenario clock, control gating, /control endpoints (30)
+│   ├── test_preview.py                 # preview overlays, snapshot output, degradation paths (21)
 │   ├── test_tcp_sensor.py              # TcpSensorServer decoders + reconnection (4)
 │   ├── test_detector_smoke.py          # FallDetector on a real image (auto-skipped when no weights)
 │   ├── test_pipeline_smoke.py          # end-to-end orchestrator + real TCP loopback (3)

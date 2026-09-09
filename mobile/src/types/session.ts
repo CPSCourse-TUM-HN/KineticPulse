@@ -41,13 +41,13 @@ export type AppSettings = {
 };
 
 /**
- * Demo defaults point at the Jetson's Tailscale address so the app works on a
- * fresh install without scanning the setup QR. Scanning still overrides these.
+ * Laptop dashboard defaults (same Wi-Fi as this machine). Expo Go reads these
+ * on a fresh install. Override in Server settings if the LAN IP changed.
  */
 export const DEFAULT_SETTINGS: AppSettings = {
-  signalingHttpBase: "http://100.71.200.114:8787",
-  signalingWsBase: "ws://100.71.200.114:8787/ws",
-  caregiverToken: "",
+  signalingHttpBase: "http://192.168.0.220:8787",
+  signalingWsBase: "ws://192.168.0.220:8787/ws",
+  caregiverToken: "dev-caregiver",
   iceServersText: "stun:stun.l.google.com:19302",
-  monitoringHttpBase: "http://100.71.200.114:8790/monitoring"
+  monitoringHttpBase: "http://192.168.0.220:3000/api/monitoring"
 };

@@ -1,5 +1,7 @@
 import { AppSettings } from "@/types/session";
 
+import { fetchTimed } from "./http";
+
 export type MonitoringEvent = {
   id: string;
   timestamp_ms: number;
@@ -20,6 +22,9 @@ export type LiveVitals = {
   emergencyTier: string;
   scenario: string;
   reason: string;
+  drill: boolean;
+  fallDetected: boolean;
+  fallConfidence: number | null;
   pose: string;
   accel: string;
   accelG: number | null;
@@ -64,35 +69,88 @@ export function previewStreamUrl(settings: AppSettings): string {
   return `${monitoringOrigin(settings)}/preview.mjpg`;
 }
 
-function hrStatusFrom(json: any, snap: any, hr: unknown): string {
-  if (json.sensor?.connection === "disconnected") return "unavailable";
-  if (snap.hr === "pulse_lost") return "pulse_lost";
+function hrStatusFrom(sensorConnection: unknown, hrSig: unknown, hr: unknown): string {
+  if (sensorConnection === "disconnected") return "unavailable";
+  if (hrSig === "pulse_lost") return "pulse_lost";
   if (typeof hr !== "number") return "unavailable";
   if (hr < 50) return "low";
   if (hr > 100) return "elevated";
   return "normal";
 }
 
-/** Poll Jetson GET /monitoring for continuous vitals (same contract as dashboard). */
+function fromDashboardModel(json: Record<string, any>): LiveVitals | null {
+  if (!json.heartRate || !json.emergency) return null;
+  const events = Array.isArray(json.recentEvents) ? json.recentEvents : [];
+  return {
+    bpm: typeof json.heartRate.bpm === "number" ? json.heartRate.bpm : null,
+    hrStatus: json.heartRate.status ?? "unavailable",
+    hrSignature: json.heartRate.simulated ? "simulated" : json.heartRate.status ?? "unknown",
+    sensorConnection: json.sensor?.connection ?? "unknown",
+    ppgSource:
+      json.simulation?.ppgSource ?? (json.heartRate.simulated ? "simulated" : "unknown"),
+    hrSimulated: json.heartRate.simulated === true,
+    emergencyTier: json.emergency.level ?? "none",
+    scenario: json.emergency.scenario ?? json.simulation?.scenario ?? "",
+    reason: json.emergency.reason ?? "",
+    drill: json.simulation?.drill === true,
+    fallDetected: json.fall?.detected === true,
+    fallConfidence: typeof json.fall?.confidence === "number" ? json.fall.confidence : null,
+    pose: json.vision?.state ?? "unknown",
+    accel: json.motion?.state ?? "unknown",
+    accelG: typeof json.motion?.magnitudeG === "number" ? json.motion.magnitudeG : null,
+    detectorClass: json.vision?.state ?? null,
+    detectorConf: typeof json.vision?.confidence === "number" ? json.vision.confidence : null,
+    actionClass: json.vision?.actionClass ?? null,
+    actionConf: null,
+    subjectId: json.subjectId ?? "unknown",
+    location: json.location ?? "unknown",
+    events: events.map((e: Record<string, any>) => ({
+      id: String(e.id),
+      timestamp_ms: e.timestampMs ?? e.timestamp_ms ?? 0,
+      severity: e.severity ?? "",
+      category: e.category ?? "",
+      title: e.title ?? "",
+      detail: e.detail ?? ""
+    })),
+    updatedAtMs: json.updatedAtMs ?? Date.now()
+  };
+}
+
+/** Poll Jetson GET /monitoring or the laptop dashboard GET /api/monitoring. */
 export async function fetchLiveVitals(settings: AppSettings): Promise<LiveVitals> {
-  const response = await fetch(monitoringUrl(settings), {
+  const response = await fetchTimed(monitoringUrl(settings), {
     headers: { Accept: "application/json" }
   });
   if (!response.ok) throw new Error(`Monitoring HTTP ${response.status}`);
   const json = await response.json();
+  const dashboard = fromDashboardModel(json);
+  if (dashboard) return dashboard;
+
   const snap = json.snapshot ?? {};
   const hr = snap.latest_hr_bpm;
 
   return {
     bpm: typeof hr === "number" ? hr : null,
-    hrStatus: hrStatusFrom(json, snap, hr),
+    hrStatus: hrStatusFrom(json.sensor?.connection, snap.hr, hr),
     hrSignature: snap.hr ?? "unknown",
     sensorConnection: json.sensor?.connection ?? "unknown",
     ppgSource: json.sensor?.ppg_source ?? "unknown",
-    hrSimulated: snap.hr_simulated === true,
+    hrSimulated: snap.hr_simulated === true || json.sensor?.ppg_source === "simulated",
     emergencyTier: snap.decision?.tier ?? "none",
     scenario: snap.decision?.scenario ?? "",
     reason: snap.decision?.reason ?? "",
+    drill: json.simulation?.drill === true,
+    fallDetected:
+      snap.pose === "falling" ||
+      snap.pose === "fallen" ||
+      snap.pose === "prone" ||
+      String(snap.decision?.tier ?? "").startsWith("tier_2"),
+    fallConfidence:
+      typeof snap.detector_conf === "number"
+        ? snap.detector_conf
+        : typeof snap.action_conf === "number"
+          ? snap.action_conf
+          : null,
     pose: snap.pose ?? "unknown",
     accel: snap.accel ?? "unknown",
     accelG: typeof snap.latest_accel_g === "number" ? snap.latest_accel_g : null,

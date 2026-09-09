@@ -39,6 +39,8 @@ If the socket drops, firmware must reconnect. Jetson closes idle clients after `
 |------|---------|
 | `wristband.transport: tcp` | Production path |
 | `wristband.has_ppg_raw: true` | Expect `ppg` bursts (else use `hr`) |
+| `monitoring.control_enabled: true` | Bench-only scenario control panel. Only functions with `--mock-ble`, i.e. when no wristband is involved at all; it never overrides live TCP telemetry. |
+| `wristband.ppg_source: simulated` | Bench mode for a dead MAX30102: `hr` / `ppg` / `pulse_lost` lines from the wristband are **ignored** and the heart rate is synthesised on the Jetson (labelled as simulated). `accel` still comes from the device. |
 | `wristband.has_accelerometer: true` | Flip when real IMU is on the board |
 
 ## Laptop bring-up (same Wi-Fi as ESP32)

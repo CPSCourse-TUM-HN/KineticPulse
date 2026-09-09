@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import math
 import random
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 from kineticpulse.config import WristbandConfig
 from kineticpulse.sensors.parser import (
@@ -260,6 +260,91 @@ def demo_posture(scenario: str, t_s: float) -> str:
     return "stand"
 
 
+def scenario_fall_offset_s(scenario: str) -> Optional[float]:
+    """When the scripted fall starts, for the non-playbook scenarios.
+
+    ``None`` for ``resting`` (nothing ever happens) and for the demo
+    playbooks (those script their own absolute timeline).
+    """
+    if scenario == "resting" or scenario in DEMO_PLAYBOOKS:
+        return None
+    return 5.0     # let the rest of the pipeline warm up first
+
+
+class ScenarioClock:
+    """Which scenario is playing, and how far into it we are.
+
+    Pulled out of :class:`MockSensorClient` for two reasons:
+
+    * the scripted-posture loop in :mod:`kineticpulse.main` reads the same
+      clock, so vision and telemetry stay in step - pressing a control-panel
+      button restarts both at the same t=0 instead of drifting apart; and
+    * the scenario is no longer fixed at construction, so
+      :class:`kineticpulse.control.ScenarioController` can swap it at
+      runtime.
+
+    ``generation`` increments on every activation. Consumers use it to
+    notice a switch (to re-log a narration, reset a buffer, etc.) without
+    having to diff timestamps.
+    """
+
+    def __init__(
+        self,
+        scenario: str = "resting",
+        *,
+        clock: Callable[[], int] = now_ms,
+    ) -> None:
+        if scenario not in MOCK_SCENARIOS:
+            raise ValueError(
+                f"Unknown scenario {scenario!r}. Expected one of: "
+                f"{', '.join(MOCK_SCENARIOS)}."
+            )
+        self._clock = clock
+        self._scenario = scenario
+        self._started_at_ms = clock()
+        self._generation = 0
+
+    @property
+    def scenario(self) -> str:
+        return self._scenario
+
+    @property
+    def started_at_ms(self) -> int:
+        return self._started_at_ms
+
+    @property
+    def generation(self) -> int:
+        return self._generation
+
+    @property
+    def elapsed_s(self) -> float:
+        return max(0.0, (self._clock() - self._started_at_ms) / 1000.0)
+
+    @property
+    def fall_offset_s(self) -> Optional[float]:
+        return scenario_fall_offset_s(self._scenario)
+
+    def select(self, scenario: str) -> None:
+        """Activate ``scenario`` and replay it from t=0.
+
+        Raises :class:`ValueError` for an unknown name so a typo from the
+        control endpoint is rejected rather than silently ignored.
+        """
+        if scenario not in MOCK_SCENARIOS:
+            raise ValueError(
+                f"Unknown scenario {scenario!r}. Expected one of: "
+                f"{', '.join(MOCK_SCENARIOS)}."
+            )
+        self._scenario = scenario
+        self._started_at_ms = self._clock()
+        self._generation += 1
+
+    def restart(self) -> None:
+        """Replay the current scenario from t=0."""
+        self._started_at_ms = self._clock()
+        self._generation += 1
+
+
 class MockSensorClient:
     """Synthesise telemetry without any hardware.
 
@@ -271,6 +356,11 @@ class MockSensorClient:
 
     SCENARIOS = MOCK_SCENARIOS
 
+    #: Telemetry is synthetic here, unlike the TCP / BLE clients. Surfaced so
+    #: the monitoring payload and the alert payload can mark a run as a drill
+    #: rather than presenting scripted falls as measured ones.
+    sensor_source = "mock"
+
     def __init__(
         self,
         cfg: WristbandConfig,
@@ -279,15 +369,23 @@ class MockSensorClient:
         accel_hz: int = 50,
         hr_hz: float = 1.0,
         seed: int = 0,
+        clock: Optional[ScenarioClock] = None,
     ) -> None:
         self.cfg = cfg
         self.events = events
-        self.scenario = scenario
+        # A shared clock lets the control panel switch scenarios mid-run; the
+        # private one keeps the old fixed-scenario constructor working.
+        self.clock = clock if clock is not None else ScenarioClock(scenario)
         self.accel_hz = accel_hz
         self.hr_hz = hr_hz
         self._stop = asyncio.Event()
         self._rng = random.Random(seed)
-        self._fall_at_s: Optional[float] = None
+        self._announced_generation = -1
+
+    @property
+    def scenario(self) -> str:
+        """The scenario playing right now (may change during the run)."""
+        return self.clock.scenario
 
     @property
     def connected(self) -> bool:
@@ -297,34 +395,44 @@ class MockSensorClient:
     async def run(self) -> None:
         log.info(
             "MockSensorClient: scenario=%s accel=%s hr=%.2fHz",
-            self.scenario,
+            self.clock.scenario,
             f"{self.accel_hz}Hz" if self.cfg.has_accelerometer else "DISABLED (no IMU)",
             self.hr_hz,
         )
-        t0_ms = now_ms()
-        if self.scenario in DEMO_PLAYBOOKS:
-            log.info("Demo %s: %s", self.scenario, DEMO_NARRATION[self.scenario])
-        elif self.scenario != "resting":
-            self._fall_at_s = 5.0   # let the rest of the pipeline warm up
-
-        loops = [self._hr_loop(t0_ms)]
+        # Time the playbook from run(), not from construction: the process may
+        # have spent seconds loading models in between.
+        self.clock.restart()
+        loops = [self._hr_loop()]
         if self.cfg.has_accelerometer:
-            loops.append(self._accel_loop(t0_ms))
+            loops.append(self._accel_loop())
         await asyncio.gather(*loops)
 
-    async def _accel_loop(self, t0_ms: int) -> None:
+    def _announce(self, scenario: str) -> None:
+        """Log the narration once per activation, including runtime switches."""
+        if self.clock.generation == self._announced_generation:
+            return
+        self._announced_generation = self.clock.generation
+        if scenario in DEMO_PLAYBOOKS:
+            log.info("Demo %s: %s", scenario, DEMO_NARRATION[scenario])
+        else:
+            log.info("Mock scenario %s active (t=0).", scenario)
+
+    async def _accel_loop(self) -> None:
         period = 1.0 / self.accel_hz
         while not self._stop.is_set():
-            t_s = (now_ms() - t0_ms) / 1000.0
-            ax, ay, az = self._accel_at(t_s)
+            # Read scenario and elapsed time together so a switch between the
+            # two cannot splice one scenario's timeline onto another's.
+            scenario, t_s = self.clock.scenario, self.clock.elapsed_s
+            ax, ay, az = self._accel_at(scenario, t_s)
             self._submit(AccelSample(ax=ax, ay=ay, az=az, timestamp_ms=now_ms()))
             await asyncio.sleep(period)
 
-    async def _hr_loop(self, t0_ms: int) -> None:
+    async def _hr_loop(self) -> None:
         period = 1.0 / self.hr_hz
         while not self._stop.is_set():
-            t_s = (now_ms() - t0_ms) / 1000.0
-            bpm = self._hr_at(t_s)
+            scenario, t_s = self.clock.scenario, self.clock.elapsed_s
+            self._announce(scenario)
+            bpm = self._hr_at(scenario, t_s)
             if bpm is None:
                 self._submit(PulseLost(duration_s=period, timestamp_ms=now_ms()))
             else:
@@ -344,46 +452,48 @@ class MockSensorClient:
                 pass
             self.events.put_nowait(ev)
 
-    def _accel_at(self, t_s: float) -> Tuple[float, float, float]:
-        """Synthesise the accel signal at time ``t_s``."""
+    def _accel_at(self, scenario: str, t_s: float) -> Tuple[float, float, float]:
+        """Synthesise the accel signal for ``scenario`` at time ``t_s``."""
         noise = lambda: self._rng.gauss(0.0, 0.02)
-        if self.scenario in DEMO_PLAYBOOKS:
-            return demo_accel(self.scenario, t_s, noise())
-        if self.scenario == "resting":
+        if scenario in DEMO_PLAYBOOKS:
+            return demo_accel(scenario, t_s, noise())
+        if scenario == "resting":
             return (noise(), noise(), 1.0 + noise())
 
-        if self._fall_at_s is None or t_s < self._fall_at_s:
+        fall_at_s = scenario_fall_offset_s(scenario)
+        if fall_at_s is None or t_s < fall_at_s:
             return (noise(), noise(), 1.0 + noise())
 
-        dt = t_s - self._fall_at_s
-        if self.scenario == "fall_a_standard":
+        dt = t_s - fall_at_s
+        if scenario == "fall_a_standard":
             if 0 <= dt < 0.15:
                 return (4.0 + noise(), 0.0 + noise(), 4.5 + noise())   # impact spike
             return (noise(), noise(), 1.0 + noise())                   # stillness
-        if self.scenario == "fall_b_seizure":
+        if scenario == "fall_b_seizure":
             if 0 <= dt < 0.15:
                 return (5.0 + noise(), 0.0 + noise(), 4.5 + noise())
             tremor = math.sin(2 * math.pi * 5.0 * dt) * 0.4
             return (tremor + noise(), tremor + noise(), 1.0 + noise())
-        if self.scenario == "fall_c_syncope":
+        if scenario == "fall_c_syncope":
             if 0 <= dt < 0.15:
                 return (2.5 + noise(), 0.0 + noise(), 3.0 + noise())   # softer collapse
             return (noise(), noise(), 1.0 + noise())
         return (noise(), noise(), 1.0 + noise())
 
-    def _hr_at(self, t_s: float) -> Optional[int]:
+    def _hr_at(self, scenario: str, t_s: float) -> Optional[int]:
         baseline = 72
         jitter = self._rng.randint(-2, 2)
-        if self.scenario in DEMO_PLAYBOOKS:
-            return demo_hr(self.scenario, t_s, jitter)
-        if self.scenario == "resting" or self._fall_at_s is None or t_s < self._fall_at_s:
+        if scenario in DEMO_PLAYBOOKS:
+            return demo_hr(scenario, t_s, jitter)
+        fall_at_s = scenario_fall_offset_s(scenario)
+        if scenario == "resting" or fall_at_s is None or t_s < fall_at_s:
             return baseline + jitter
-        dt = t_s - self._fall_at_s
-        if self.scenario == "fall_a_standard":
+        dt = t_s - fall_at_s
+        if scenario == "fall_a_standard":
             return min(125, baseline + int(dt * 35) + jitter)
-        if self.scenario == "fall_b_seizure":
+        if scenario == "fall_b_seizure":
             return min(170, baseline + int(dt * 90) + jitter)
-        if self.scenario == "fall_c_syncope":
+        if scenario == "fall_c_syncope":
             if dt > 2.0:
                 return None    # pulse lost
             return max(40, baseline - int(dt * 25) + jitter)

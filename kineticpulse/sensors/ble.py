@@ -63,6 +63,8 @@ DEFAULT_PPG_CHARACTERISTIC = "0000ff02-0000-1000-8000-00805f9b34fb"
 class BleClient:
     """Real BLE client backed by `bleak`."""
 
+    sensor_source = "hardware"    # real wristband telemetry
+
     def __init__(self, cfg: WristbandConfig, events: "asyncio.Queue[SensorEvent]") -> None:
         self.cfg = cfg
         self.events = events

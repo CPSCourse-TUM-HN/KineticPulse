@@ -1,4 +1,4 @@
-import { Pressable, StyleSheet, Text, View, type PressableProps, type ViewStyle } from "react-native";
+import { Pressable, StyleSheet, Text, type PressableProps, type ViewStyle } from "react-native";
 
 import { colors, radius, spacing, typography } from "@/theme";
 
