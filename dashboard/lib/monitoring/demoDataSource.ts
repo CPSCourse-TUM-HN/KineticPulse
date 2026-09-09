@@ -39,7 +39,9 @@ function wireForActiveScenario(): MonitoringWirePayload {
       timestamp_ms: now
     },
     voice: { status: cardiac ? "not_required" : drill ? "pending" : "not_required" },
-    alert_dispatch: { status: drill ? "idle" : "idle" },
+    alert_dispatch: {
+      status: cardiac || tier.startsWith("tier_2") ? "sent" : drill ? "pending" : "idle"
+    },
     simulation: {
       drill,
       sensor_source: "mock",
@@ -58,8 +60,8 @@ function wireForActiveScenario(): MonitoringWirePayload {
       {
         id: `demo-${runtime.generation}`,
         timestamp_ms: runtime.startedAt,
-        severity: drill ? "warning" : "info",
-        category: "system",
+        severity: tier.startsWith("tier_2") ? "critical" : drill ? "warning" : "info",
+        category: drill ? "alert" : "system",
         title: drill ? info?.label ?? runtime.scenario : "Monitoring online",
         detail: drill ? info?.description ?? "" : "Wristband and camera are reporting."
       }

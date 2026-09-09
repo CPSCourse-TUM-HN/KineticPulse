@@ -1,3 +1,6 @@
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { mapControlPayload, type ControlModel, type ScenarioOption } from "./model";
 
 export type DemoRuntime = {
@@ -20,13 +23,31 @@ for (const s of CATALOGUE) {
   byKey.set(s.alias, s);
 }
 
-const g = globalThis as typeof globalThis & { kineticPulseDemo?: DemoRuntime };
+// ponytail: file, not globalThis — Next workers / two `next dev`s were serving
+// resting vitals while SQLite still had the drill event.
+const STATE_FILE = join(process.cwd(), "runtime", "demo-runtime.json");
+
+function readState(): DemoRuntime | null {
+  try {
+    const parsed = JSON.parse(readFileSync(STATE_FILE, "utf8")) as DemoRuntime;
+    if (typeof parsed.scenario === "string" && typeof parsed.generation === "number") return parsed;
+  } catch {
+    // missing or junk — caller creates a baseline
+  }
+  return null;
+}
+
+function writeState(runtime: DemoRuntime): void {
+  mkdirSync(join(process.cwd(), "runtime"), { recursive: true });
+  writeFileSync(STATE_FILE, JSON.stringify(runtime));
+}
 
 export function getDemoRuntime(): DemoRuntime {
-  if (!g.kineticPulseDemo) {
-    g.kineticPulseDemo = { scenario: "resting", startedAt: Date.now(), generation: 0 };
-  }
-  return g.kineticPulseDemo;
+  const existing = readState();
+  if (existing) return existing;
+  const fresh = { scenario: "resting", startedAt: Date.now(), generation: 0 };
+  writeState(fresh);
+  return fresh;
 }
 
 export function resolveDemoScenario(name: string): ScenarioOption {
@@ -41,10 +62,12 @@ export function demoCatalogue(): ScenarioOption[] {
 
 export function applyDemoScenario(name: string): ControlModel {
   const info = resolveDemoScenario(name);
-  const runtime = getDemoRuntime();
-  runtime.scenario = info.id;
-  runtime.startedAt = Date.now();
-  runtime.generation += 1;
+  const prev = readState();
+  writeState({
+    scenario: info.id,
+    startedAt: Date.now(),
+    generation: (prev?.generation ?? 0) + 1
+  });
   return demoControlModel();
 }
 

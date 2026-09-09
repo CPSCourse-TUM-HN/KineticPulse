@@ -35,6 +35,10 @@ function emergencyLabel(level: string): string {
   return labels[level] ?? words(level);
 }
 
+function isOpenAlert(tier: string): boolean {
+  return tier.startsWith("tier_1") || tier.startsWith("tier_2");
+}
+
 function headline(vitals: LiveVitals): string {
   const tier = vitals.emergencyTier;
   if (tier.startsWith("tier_2") || vitals.fallDetected) return "Emergency response active";
@@ -92,19 +96,12 @@ export default function HomeScreen() {
       settingsRef.current = cfg;
       setLoading(false);
 
-      const [liveVitals, sessionList] = await Promise.allSettled([
-        fetchLiveVitals(cfg),
-        fetchSessions(cfg)
-      ]);
-
-      if (liveVitals.status === "fulfilled") {
-        setVitals(liveVitals.value);
-        setOffline(false);
-      } else {
-        setOffline(true);
-      }
-
-      if (sessionList.status === "fulfilled") setSessions(sessionList.value);
+      const live = await fetchLiveVitals(cfg);
+      setVitals(live);
+      setOffline(false);
+      void fetchSessions(cfg).then(setSessions).catch(() => setSessions([]));
+    } catch {
+      setOffline(true);
     } finally {
       busyRef.current = false;
       setLoading(false);
@@ -185,6 +182,27 @@ export default function HomeScreen() {
 
       {offline && !vitals ? (
         <Text style={styles.error}>Can&apos;t reach monitoring. Pull down to retry.</Text>
+      ) : null}
+
+      {vitals && isOpenAlert(tier) ? (
+        <View style={styles.section}>
+          <Text style={styles.sectionLabel}>Active alert</Text>
+          <View style={styles.panel}>
+            <SpecRow label="Status" value={emergencyLabel(tier)} />
+            <SpecRow label="What happened" value={vitals.reason} />
+            <SpecRow
+              label="Heart rate"
+              value={
+                vitals.bpm == null
+                  ? vitals.hrStatus === "pulse_lost"
+                    ? "Pulse lost"
+                    : "No signal"
+                  : `${vitals.bpm} BPM`
+              }
+              last
+            />
+          </View>
+        </View>
       ) : null}
 
       <View style={styles.section}>
