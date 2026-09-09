@@ -40,10 +40,14 @@ export type AppSettings = {
   monitoringHttpBase?: string;
 };
 
+/**
+ * Demo defaults point at the Jetson's Tailscale address so the app works on a
+ * fresh install without scanning the setup QR. Scanning still overrides these.
+ */
 export const DEFAULT_SETTINGS: AppSettings = {
-  signalingHttpBase: "http://localhost:8787",
-  signalingWsBase: "ws://localhost:8787/ws",
+  signalingHttpBase: "http://100.71.200.114:8787",
+  signalingWsBase: "ws://100.71.200.114:8787/ws",
   caregiverToken: "",
   iceServersText: "stun:stun.l.google.com:19302",
-  monitoringHttpBase: ""
+  monitoringHttpBase: "http://100.71.200.114:8790/monitoring"
 };
